@@ -1,8 +1,9 @@
 [package]
 name = "clipbridge"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Lightweight LAN clipboard sync tray app"
+license = "MIT"
 publish = false
 
 [workspace]

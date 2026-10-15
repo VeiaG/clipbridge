@@ -180,3 +180,7 @@ cargo run -- --headless --verbose           # run with logs in the terminal
 Integration tests start several nodes in one process on loopback, using a mock
 clipboard. Setting `CLIPBRIDGE_BIND=127.0.0.1` makes the app listen on loopback
 only, which is handy for local experiments without firewall prompts.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -12,7 +12,8 @@
 AppId={{6F0B7C2E-3A51-4E8B-9C2D-1B7A4E5F9D30}
 AppName=ClipBridge
 AppVersion={#AppVersion}
-AppPublisher=ClipBridge
+AppPublisher=VeiaG
+AppPublisherURL=https://github.com/VeiaG/clipbridge
 DefaultDirName={localappdata}\Programs\ClipBridge
 DisableDirPage=yes
 DisableProgramGroupPage=yes
