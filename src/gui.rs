@@ -240,8 +240,40 @@ impl SettingsApp {
                         .map(|e| format!("  ·  last: {e}"))
                         .unwrap_or_default()
                 ));
+                self.update_row(ui, s);
             }
         }
+    }
+
+    fn update_row(&mut self, ui: &mut egui::Ui, s: &AppStatus) {
+        let u = &s.update;
+        ui.horizontal(|ui| {
+            ui.label(format!("Version {}", s.version));
+            match &u.available {
+                Some(info) => {
+                    ui.colored_label(GREEN, format!("·  {} is available", info.version));
+                    let label = if info.can_install() {
+                        "Update now"
+                    } else {
+                        "Download…"
+                    };
+                    if ui.add_enabled(!u.busy, egui::Button::new(label)).clicked() {
+                        let _ = control::request(&self.config_path, Command::InstallUpdate);
+                    }
+                }
+                None => {
+                    if ui
+                        .add_enabled(!u.busy, egui::Button::new("Check for updates").small())
+                        .clicked()
+                    {
+                        let _ = control::request(&self.config_path, Command::CheckUpdates);
+                    }
+                }
+            }
+            if let Some(note) = &u.note {
+                ui.label(note);
+            }
+        });
     }
 
     fn peers_section(&self, ui: &mut egui::Ui, status: &Option<Result<AppStatus, String>>) {
@@ -317,6 +349,16 @@ impl SettingsApp {
 
                 ui.label("Discovery");
                 ui.checkbox(&mut self.cfg.discovery, "find peers automatically (mDNS)");
+                ui.end_row();
+
+                ui.label("Updates");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.cfg.check_updates, "check for updates");
+                    ui.add_enabled(
+                        self.cfg.check_updates,
+                        egui::Checkbox::new(&mut self.cfg.auto_update, "install automatically"),
+                    );
+                });
                 ui.end_row();
 
                 ui.label("Manual peers");

@@ -46,6 +46,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\clipbridge.exe"; Description: "Launch ClipBridge"; Flags: nowait postinstall skipifsilent
+; Silent install = auto-update started by the app: launch the new version right away.
+Filename: "{app}\clipbridge.exe"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM clipbridge.exe"; Flags: runhidden; RunOnceId: "KillClipBridge"

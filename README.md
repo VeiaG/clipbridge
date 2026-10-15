@@ -84,6 +84,21 @@ on one side is enough.
 Tray icon colours: **green** syncing · **grey** paused · **amber** not configured ·
 **red** error (see Settings or the log).
 
+## Updates
+
+ClipBridge checks GitHub for a new release shortly after start and then every
+12 hours. When one is out, the tray menu shows **Update to x.y.z** (also in
+Settings). Tick **install automatically** in Settings to skip the click.
+
+- **Windows (installed):** the new installer runs silently and restarts the app.
+- **macOS (in Applications):** the app replaces itself and restarts. No Gatekeeper
+  prompt this time, since the app downloaded the update itself.
+- **Portable exe or bare binary:** you get a link to the release page instead.
+
+Every release includes a `manifest.json` signed with the project's ed25519 key
+(the public key is built into the app), listing a blake3 hash for each file. An
+update whose signature or hash doesn't match is refused.
+
 ## Configuration
 
 `config.toml` sits in the platform config directory:
@@ -104,6 +119,8 @@ Tray icon colours: **green** syncing · **grey** paused · **amber** not configu
 | `sync_html`    | `true`           | Keep formatting (HTML) when copying rich text. |
 | `max_image_mb` | `20`             | Images larger than this (as PNG) are skipped. Max 30. |
 | `discovery`    | `true`           | Use mDNS to find peers. |
+| `check_updates`| `true`           | Look for new versions on GitHub every 12 h. |
+| `auto_update`  | `false`          | Install new versions without asking. |
 
 Edits made in Settings, or straight in the file, take effect within a second or
 so; no restart needed.

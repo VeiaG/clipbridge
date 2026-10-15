@@ -67,10 +67,17 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # manifest.json + signature: what the in-app updater downloads and verifies.
+      - name: Sign update manifest
+        env:
+          CLIPBRIDGE_SIGNING_KEY: ${{ secrets.CLIPBRIDGE_SIGNING_KEY }}
+        run: cargo run --release -p release-sign -- manifest dist "${GITHUB_REF_NAME}"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

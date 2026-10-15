@@ -27,6 +27,10 @@ pub struct Config {
     pub max_image_mb: u32,
     /// Advertise and browse via mDNS. Turn off on networks where multicast is blocked.
     pub discovery: bool,
+    /// Look for new versions on GitHub (every 12 h).
+    pub check_updates: bool,
+    /// Install new versions without asking.
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -41,6 +45,8 @@ impl Default for Config {
             sync_html: true,
             max_image_mb: DEFAULT_MAX_IMAGE_MB,
             discovery: true,
+            check_updates: true,
+            auto_update: false,
         }
     }
 }

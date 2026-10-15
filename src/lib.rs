@@ -14,3 +14,4 @@ pub mod node;
 pub mod protocol;
 pub mod sync;
 pub mod tray;
+pub mod update;

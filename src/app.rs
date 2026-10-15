@@ -1,5 +1,5 @@
 //! App supervisor: owns the config, (re)starts the sync node, serves the control
-//! channel and publishes status to the tray.
+//! channel, checks for updates and publishes status to the tray.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -15,8 +15,13 @@ use crate::crypto::Cipher;
 use crate::net::{PeerStatus, PendingStatus};
 use crate::node::{self, NodeHandle, NodeParams};
 use crate::sync::SyncStats;
+use crate::update::{self, UpdateInfo};
 
 const RETRY_START: Duration = Duration::from_secs(10);
+const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(20);
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(12 * 3600);
+/// After a failed check, try again sooner than the regular interval.
+const UPDATE_RETRY: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +31,16 @@ pub enum State {
     Active,
     Paused,
     Error,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    /// A newer version that is available.
+    pub available: Option<UpdateInfo>,
+    /// A check or install is running.
+    pub busy: bool,
+    /// Last outcome worth showing ("Up to date", "Update failed: …").
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,11 +58,15 @@ pub struct AppStatus {
     pub config_path: String,
     pub log_dir: String,
     pub version: String,
+    #[serde(default)]
+    pub update: UpdateStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiCmd {
     SetPaused(bool),
+    /// Install the available update, or check for one if none is known.
+    Update,
     Quit,
 }
 
@@ -65,6 +84,15 @@ pub struct AppOptions {
     pub clipboard: Result<(ClipboardHandle, watch::Receiver<u64>), String>,
 }
 
+/// Results of update work done on blocking threads.
+enum UpdateEvent {
+    Checked {
+        result: Result<Option<UpdateInfo>, String>,
+        manual: bool,
+    },
+    Installed(Result<(), String>),
+}
+
 struct App {
     opts: AppOptions,
     config: Option<Config>,
@@ -75,10 +103,26 @@ struct App {
     error: Option<String>,
     config_error: Option<String>,
     last_start_attempt: Option<Instant>,
+    started: Instant,
+    update: UpdateStatus,
+    next_update_check: Option<Instant>,
+    update_tx: mpsc::Sender<UpdateEvent>,
+    /// Set once an update has been handed to the installer; the app then exits.
+    quit_for_update: bool,
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Whether two configs differ only in settings that don't affect syncing.
+fn same_sync_settings(a: &Config, b: &Config) -> bool {
+    let strip = |c: &Config| Config {
+        check_updates: false,
+        auto_update: false,
+        ..c.clone()
+    };
+    strip(a) == strip(b)
 }
 
 impl App {
@@ -101,7 +145,12 @@ impl App {
         let Some(cfg) = self.load_config() else {
             return; // keep running with the previous config
         };
-        if self.config.as_ref() == Some(&cfg) && (self.node.is_some() || !cfg.is_configured()) {
+        let unchanged_sync = self
+            .config
+            .as_ref()
+            .is_some_and(|old| same_sync_settings(old, &cfg));
+        if unchanged_sync && (self.node.is_some() || !cfg.is_configured()) {
+            self.config = Some(cfg); // update-related settings only
             return;
         }
         tracing::info!(
@@ -219,7 +268,8 @@ impl App {
             stats,
             config_path: self.opts.config_path.display().to_string(),
             log_dir: self.opts.log_dir.display().to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: update::current_version().to_string(),
+            update: self.update.clone(),
         }
     }
 
@@ -229,15 +279,114 @@ impl App {
             self.paused.send_replace(paused);
         }
     }
+
+    // --- updates -------------------------------------------------------------
+
+    fn start_update_check(&mut self, manual: bool) {
+        if self.update.busy {
+            return;
+        }
+        self.update.busy = true;
+        if manual {
+            self.update.note = Some("Checking for updates…".into());
+        }
+        let tx = self.update_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = update::check().map_err(|e| format!("{e:#}"));
+            let _ = tx.blocking_send(UpdateEvent::Checked { result, manual });
+        });
+    }
+
+    fn start_update_install(&mut self) {
+        if self.update.busy {
+            return;
+        }
+        let Some(info) = self.update.available.clone() else {
+            self.start_update_check(true);
+            return;
+        };
+        if !info.can_install() {
+            // Portable copy or bare binary: send the user to the release page.
+            crate::tray::open_url(&info.release_url);
+            return;
+        }
+        self.update.busy = true;
+        self.update.note = Some(format!("Downloading {}…", info.version));
+        tracing::info!("installing update {}", info.version);
+        let tx = self.update_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = update::install(&info).map_err(|e| format!("{e:#}"));
+            let _ = tx.blocking_send(UpdateEvent::Installed(result));
+        });
+    }
+
+    fn on_update_event(&mut self, ev: UpdateEvent) {
+        self.update.busy = false;
+        match ev {
+            UpdateEvent::Checked { result, manual } => {
+                let now = Instant::now();
+                match result {
+                    Ok(Some(info)) => {
+                        self.next_update_check = Some(now + UPDATE_CHECK_EVERY);
+                        if self.update.available.as_ref() != Some(&info) {
+                            tracing::info!("update available: {}", info.version);
+                        }
+                        self.update.note = None;
+                        self.update.available = Some(info.clone());
+                        let auto = self.config.as_ref().is_some_and(|c| c.auto_update);
+                        if auto && info.can_install() {
+                            self.start_update_install();
+                        }
+                    }
+                    Ok(None) => {
+                        self.next_update_check = Some(now + UPDATE_CHECK_EVERY);
+                        self.update.available = None;
+                        self.update.note = manual.then(|| "Up to date".to_string());
+                    }
+                    Err(e) => {
+                        self.next_update_check = Some(now + UPDATE_RETRY);
+                        tracing::warn!("update check failed: {e}");
+                        self.update.note = manual.then(|| format!("Update check failed: {e}"));
+                    }
+                }
+            }
+            UpdateEvent::Installed(Ok(())) => {
+                let v = self.update.available.as_ref().map(|i| i.version.clone());
+                tracing::info!("update {} handed over; restarting", v.unwrap_or_default());
+                self.update.note = Some("Restarting with the new version…".into());
+                self.quit_for_update = true;
+            }
+            UpdateEvent::Installed(Err(e)) => {
+                tracing::warn!("update failed: {e}");
+                self.update.note = Some(format!("Update failed: {e}"));
+            }
+        }
+    }
+
+    fn maybe_check_updates(&mut self) {
+        let enabled = self.config.as_ref().is_some_and(|c| c.check_updates);
+        if !enabled || self.update.busy {
+            return;
+        }
+        let due = match self.next_update_check {
+            Some(t) => Instant::now() >= t,
+            None => self.started.elapsed() >= FIRST_UPDATE_CHECK,
+        };
+        if due {
+            self.start_update_check(false);
+        }
+    }
 }
 
-/// Runs until `UiCmd::Quit`. `sink` receives status updates and UI requests.
+/// Runs until `UiCmd::Quit` (or an update takes over). `sink` receives status
+/// updates and UI requests.
 pub async fn run(
     opts: AppOptions,
     mut ui: mpsc::Receiver<UiCmd>,
     sink: impl Fn(AppEvent) + Send + 'static,
 ) {
     let (paused, _) = watch::channel(false);
+    let (update_tx, mut update_rx) = mpsc::channel(4);
     let mut app = App {
         opts,
         config: None,
@@ -248,6 +397,11 @@ pub async fn run(
         error: None,
         config_error: None,
         last_start_attempt: None,
+        started: Instant::now(),
+        update: UpdateStatus::default(),
+        next_update_check: None,
+        update_tx,
+        quit_for_update: false,
     };
     let cancel = CancellationToken::new();
     let (ctl_tx, mut ctl_rx) = mpsc::channel::<ControlRequest>(8);
@@ -267,6 +421,7 @@ pub async fn run(
         tokio::select! {
             cmd = ui.recv() => match cmd {
                 Some(UiCmd::SetPaused(p)) => app.set_paused(p),
+                Some(UiCmd::Update) => app.start_update_install(),
                 Some(UiCmd::Quit) | None => break,
             },
             Some(req) = ctl_rx.recv() => {
@@ -276,6 +431,8 @@ pub async fn run(
                     Command::Pause => app.set_paused(true),
                     Command::Resume => app.set_paused(false),
                     Command::OpenSettings => sink(AppEvent::OpenSettings),
+                    Command::CheckUpdates => app.start_update_check(true),
+                    Command::InstallUpdate => app.start_update_install(),
                 }
                 let _ = req.reply.send(Response {
                     ok: true,
@@ -283,6 +440,7 @@ pub async fn run(
                     error: None,
                 });
             }
+            Some(ev) = update_rx.recv() => app.on_update_event(ev),
             _ = tick.tick() => {
                 // Pick up hand edits of the config file.
                 if mtime(&app.opts.config_path) != app.config_mtime {
@@ -293,6 +451,7 @@ pub async fn run(
                 {
                     app.restart().await; // e.g. port was busy
                 }
+                app.maybe_check_updates();
             }
         }
         let status = app.status();
@@ -301,11 +460,35 @@ pub async fn run(
             sink(AppEvent::Status(Box::new(status.clone())));
             last_status = Some(status);
         }
+        if app.quit_for_update {
+            break;
+        }
     }
 
     tracing::info!("shutting down");
     cancel.cancel();
     if let Some(n) = app.node.take() {
         n.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_settings_do_not_restart_sync() {
+        let a = Config::default();
+        let b = Config {
+            auto_update: true,
+            check_updates: false,
+            ..a.clone()
+        };
+        assert!(same_sync_settings(&a, &b));
+        let c = Config {
+            port: a.port + 1,
+            ..a.clone()
+        };
+        assert!(!same_sync_settings(&a, &c));
     }
 }

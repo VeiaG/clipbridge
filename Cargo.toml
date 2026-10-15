@@ -5,6 +5,9 @@ edition = "2024"
 description = "Lightweight LAN clipboard sync tray app"
 publish = false
 
+[workspace]
+members = [".", "tools/release-sign"]
+
 [lib]
 name = "clipbridge"
 path = "src/lib.rs"
@@ -23,6 +26,7 @@ bytes = "1.12.1"
 chacha20poly1305 = "0.11.0"
 clipboard-master = "4.0.0"
 directories = "6.0.0"
+ed25519-dalek = "3.0.0"
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
@@ -38,6 +42,7 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tray-icon = "0.26.1"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 uuid = { version = "1.28.0", features = ["v4", "serde"] }
 
 [profile.release]
@@ -49,14 +54,7 @@ panic = "abort"
 # Crypto and PNG are painfully slow unoptimized; keep debug builds and tests snappy.
 [profile.dev.package]
 argon2.opt-level = 3
-blake2.opt-level = 3
 blake3.opt-level = 3
-chacha20.opt-level = 3
-poly1305.opt-level = 3
-png.opt-level = 3
-fdeflate.opt-level = 3
-miniz_oxide.opt-level = 3
-crc32fast.opt-level = 3
 image.opt-level = 3
 
 [dev-dependencies]

@@ -84,6 +84,21 @@ fn set_tray_icon(tray: &TrayIcon, icon: Icon, template: bool) {
 // ---------------------------------------------------------------------------------
 // Helpers
 
+/// Opens a web page in the default browser.
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    let res = std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let res = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let res = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = res {
+        tracing::warn!("cannot open {url}: {e}");
+    }
+}
+
 pub fn open_path(path: &Path, as_text: bool) {
     #[cfg(target_os = "windows")]
     let mut cmd = if as_text {
@@ -186,6 +201,7 @@ struct Items {
     open_config: MenuItem,
     open_logs: MenuItem,
     autostart: CheckMenuItem,
+    update: MenuItem,
     quit: MenuItem,
 }
 
@@ -197,6 +213,7 @@ fn build_menu(autostart: bool) -> Result<(Menu, Items)> {
         open_config: MenuItem::new("Open config file", true, None),
         open_logs: MenuItem::new("Open logs folder", true, None),
         autostart: CheckMenuItem::new("Start at login", true, autostart, None),
+        update: MenuItem::new("Check for updates", true, None),
         quit: MenuItem::new("Quit ClipBridge", true, None),
     };
     let menu = Menu::new();
@@ -209,6 +226,7 @@ fn build_menu(autostart: bool) -> Result<(Menu, Items)> {
         &items.open_config,
         &items.open_logs,
         &items.autostart,
+        &items.update,
         &PredefinedMenuItem::separator(),
         &items.quit,
     ])
@@ -277,6 +295,15 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
                     }
                     items.status.set_text(text);
                     items.pause.set_checked(status.state == State::Paused);
+                    let u = &status.update;
+                    let text = match (&u.available, u.busy) {
+                        (_, true) => "Updating…".to_string(),
+                        (Some(i), _) if i.can_install() => format!("Update to {}", i.version),
+                        (Some(i), _) => format!("Download {}…", i.version),
+                        (None, _) => "Check for updates".to_string(),
+                    };
+                    items.update.set_text(text);
+                    items.update.set_enabled(!u.busy);
                 }
                 last_status = Some(*status);
             }
@@ -303,6 +330,8 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
                 } else if id == items.open_logs.id() {
                     let _ = std::fs::create_dir_all(&opts.log_dir);
                     open_path(&opts.log_dir, false);
+                } else if id == items.update.id() {
+                    let _ = ui.try_send(UiCmd::Update);
                 } else if id == items.autostart.id() {
                     let want = items.autostart.is_checked();
                     if let Err(e) = set_autostart(&opts.passthrough_args, want) {

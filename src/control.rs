@@ -26,6 +26,8 @@ pub enum Command {
     Pause,
     Resume,
     OpenSettings,
+    CheckUpdates,
+    InstallUpdate,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
