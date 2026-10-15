@@ -4,7 +4,7 @@ ClipBridge keeps the clipboard in sync across your computers on the same local
 network. Copy on one machine, paste on another. It's a small tray app (menu bar on
 macOS) for **Windows and macOS**, written in Rust.
 
-- Syncs **text and images**. Files are not synced.
+- Syncs **text, rich text (HTML) and images**. Files are not synced.
 - **Finds the other machines on its own** via mDNS/Bonjour. If your network blocks
   that, list the peers by hand.
 - **Everything on the wire is encrypted** with ChaCha20-Poly1305. The key comes from
@@ -27,8 +27,15 @@ Ready-made builds are on the [Releases](../../releases) page.
 
 ### Windows
 
-- Run `clipbridge.exe`. There's no console window; the icon shows up in the
-  notification area (you may need to expand the `^` overflow).
+- Download `ClipBridge-<version>-windows-x64-setup.exe` from
+  [Releases](../../releases) and run it. No admin rights needed: it installs to
+  `%LOCALAPPDATA%\Programs\ClipBridge`, adds a Start menu entry and, if you tick
+  the box, starts ClipBridge when you sign in. Uninstall from *Settings → Apps*;
+  your settings are kept.
+- Prefer not to install? `…-portable.exe` runs from anywhere. If you enable
+  "Start at login" with it, don't move the file afterwards.
+- There's no console window; the icon shows up in the notification area (you may
+  need to expand the `^` overflow).
 - The first time it runs, **Windows Firewall** asks whether ClipBridge may talk on
   the network. Allow it on **private** networks, or other machines can't connect.
   If you clicked it away, allow `clipbridge.exe` under
@@ -94,6 +101,7 @@ Tray icon colours: **green** syncing · **grey** paused · **amber** not configu
 | `port`         | `47821`          | TCP port to listen on. |
 | `manual_peers` | `[]`             | Extra peers as `"host:port"`. |
 | `sync_images`  | `true`           | Sync images as well as text. |
+| `sync_html`    | `true`           | Keep formatting (HTML) when copying rich text. |
 | `max_image_mb` | `20`             | Images larger than this (as PNG) are skipped. Max 30. |
 | `discovery`    | `true`           | Use mDNS to find peers. |
 
@@ -129,8 +137,12 @@ sleep/wake, all connections are re-established right away.
 
 ## Known limitations
 
-- Only text and images (PNG). No files, rich text/HTML, or other formats. If both
+- Text, rich text (HTML) and images (PNG) only. No files or other formats. If both
   text and an image are on the clipboard, the text wins.
+- Rich text travels as HTML. Apps that copy only RTF (e.g. TextEdit, Pages) sync
+  as plain text.
+- Peers must run the same protocol version: update all machines together
+  (0.1.0 cannot talk to newer versions).
 - Text is limited to 2 MB; images to `max_image_mb`, which can't go above 30 MB
   because of the 32 MB frame limit.
 - Peers must be on the same LAN or reachable via manual `host:port` entries.
