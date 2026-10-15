@@ -276,3 +276,23 @@ async fn mdns_discovery_connects() {
     a_mock.copy(RawClip::Text("via mdns".into()));
     eventually("b receives", || b_mock.content() == text("via mdns")).await;
 }
+
+#[tokio::test]
+async fn rich_text_propagates_with_plain_alternative() {
+    let a = TestNode::start("a", 0, &[], "right").await;
+    let b = TestNode::start("b", 0, &[a.addr()], "right").await;
+    eventually("connected", || a.peer_count() == 1 && b.peer_count() == 1).await;
+
+    let rich = RawClip::Html {
+        html: "<p>Hello <b>world</b></p>".into(),
+        text: "Hello world".into(),
+    };
+    a.mock.copy(rich.clone());
+    eventually("b receives rich text", || {
+        b.mock.content() == Some(rich.clone())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(a.mock.writes().len(), 0);
+    assert_eq!(b.mock.writes().len(), 1);
+}

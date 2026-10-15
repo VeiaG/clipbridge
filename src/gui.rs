@@ -311,6 +311,10 @@ impl SettingsApp {
                 });
                 ui.end_row();
 
+                ui.label("Rich text");
+                ui.checkbox(&mut self.cfg.sync_html, "keep formatting (HTML)");
+                ui.end_row();
+
                 ui.label("Discovery");
                 ui.checkbox(&mut self.cfg.discovery, "find peers automatically (mDNS)");
                 ui.end_row();

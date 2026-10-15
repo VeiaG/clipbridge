@@ -22,6 +22,8 @@ pub struct Config {
     pub port: u16,
     pub manual_peers: Vec<String>,
     pub sync_images: bool,
+    /// Sync rich text (HTML) along with plain text.
+    pub sync_html: bool,
     pub max_image_mb: u32,
     /// Advertise and browse via mDNS. Turn off on networks where multicast is blocked.
     pub discovery: bool,
@@ -36,6 +38,7 @@ impl Default for Config {
             port: DEFAULT_PORT,
             manual_peers: Vec::new(),
             sync_images: true,
+            sync_html: true,
             max_image_mb: DEFAULT_MAX_IMAGE_MB,
             discovery: true,
         }

@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::clipboard::{ClipboardHandle, ReadOpts, ReadOutcome};
+use crate::clipboard::{ClipboardHandle, ReadOpts, ReadOutcome, Want};
 use crate::protocol::{Clip, ClipKind, Hash, MAX_TEXT_BYTES, short_hash};
 
 const SEEN_CAPACITY: usize = 256;
@@ -26,6 +26,7 @@ pub struct Limits {
     pub max_text_bytes: usize,
     pub max_image_bytes: usize,
     pub sync_images: bool,
+    pub sync_html: bool,
 }
 
 impl Limits {
@@ -34,24 +35,37 @@ impl Limits {
             max_text_bytes: MAX_TEXT_BYTES,
             max_image_bytes: cfg.max_image_bytes(),
             sync_images: cfg.sync_images,
+            sync_html: cfg.sync_html,
         }
     }
 
-    /// Why this content may not be synced, if anything.
-    fn violation(&self, kind: &ClipKind) -> Option<String> {
-        match kind {
-            ClipKind::Text(t) if t.len() > self.max_text_bytes => Some(format!(
+    /// The content to actually sync, or why it may not be synced. Rich text that is
+    /// disabled or too large degrades to its plain-text alternative.
+    fn fit(&self, kind: ClipKind) -> Result<ClipKind, String> {
+        let text_too_large = |t: &str| {
+            format!(
                 "text too large ({} > {} bytes)",
                 t.len(),
                 self.max_text_bytes
-            )),
-            ClipKind::Image(_) if !self.sync_images => Some("image sync disabled".into()),
-            ClipKind::Image(png) if png.len() > self.max_image_bytes => Some(format!(
+            )
+        };
+        match kind {
+            ClipKind::Text(t) if t.len() > self.max_text_bytes => Err(text_too_large(&t)),
+            ClipKind::Html { text, .. } if text.len() > self.max_text_bytes => {
+                Err(text_too_large(&text))
+            }
+            ClipKind::Html { html, text }
+                if !self.sync_html || html.len() > self.max_text_bytes =>
+            {
+                Ok(ClipKind::Text(text))
+            }
+            ClipKind::Image(_) if !self.sync_images => Err("image sync disabled".into()),
+            ClipKind::Image(png) if png.len() > self.max_image_bytes => Err(format!(
                 "image too large ({} > {} bytes as PNG)",
                 png.len(),
                 self.max_image_bytes
             )),
-            _ => None,
+            other => Ok(other),
         }
     }
 }
@@ -127,15 +141,24 @@ impl SyncCore {
         self.limits
     }
 
+    /// Formats worth reading from the clipboard under the current limits.
+    pub fn want(&self) -> Want {
+        Want {
+            images: self.limits.sync_images,
+            html: self.limits.sync_html,
+        }
+    }
+
     /// The local clipboard changed to `kind` (debounced, already read).
     pub fn on_local(&mut self, kind: ClipKind, hash: Hash) -> LocalAction {
         if self.current == Some(hash) {
             return LocalAction::Ignore("unchanged (own write or same content)".into());
         }
         self.current = Some(hash);
-        if let Some(why) = self.limits.violation(&kind) {
-            return LocalAction::Ignore(why);
-        }
+        let kind = match self.limits.fit(kind) {
+            Ok(k) => k,
+            Err(why) => return LocalAction::Ignore(why),
+        };
         let clip = Clip {
             clip_id: Uuid::new_v4(),
             origin: self.device_id.clone(),
@@ -157,10 +180,10 @@ impl SyncCore {
         if self.current == Some(clip.hash) {
             return RemoteAction::Skip("already on clipboard".into());
         }
-        if let Some(why) = self.limits.violation(&clip.kind) {
-            return RemoteAction::Skip(why);
+        match self.limits.fit(clip.kind) {
+            Ok(kind) => RemoteAction::Apply(kind),
+            Err(why) => RemoteAction::Skip(why),
         }
-        RemoteAction::Apply(clip.kind)
     }
 
     /// A remote clip was written; `written` is the hash the clipboard now reports.
@@ -206,7 +229,7 @@ pub async fn run(mut t: SyncTask) {
     // by an identical remote clip.
     t.changes.mark_unchanged();
     let opts = ReadOpts {
-        want_images: t.core.limits().sync_images,
+        want: t.core.want(),
         known: None,
     };
     if let Ok(ReadOutcome::Clip { hash, .. }) = t.clipboard.read(opts).await {
@@ -240,7 +263,7 @@ async fn handle_local(t: &mut SyncTask) {
         return;
     }
     let opts = ReadOpts {
-        want_images: t.core.limits().sync_images,
+        want: t.core.want(),
         known: t.core.current(),
     };
     let (kind, hash) = match t.clipboard.read(opts).await {
@@ -249,7 +272,10 @@ async fn handle_local(t: &mut SyncTask) {
             tracing::debug!("clipboard change ignored: unchanged");
             return;
         }
-        Ok(ReadOutcome::Empty) => return,
+        Ok(ReadOutcome::Empty) => {
+            tracing::debug!("clipboard change ignored: empty or unsupported format");
+            return;
+        }
         Err(e) => {
             tracing::warn!("reading clipboard failed: {e:#}");
             return;
@@ -302,6 +328,7 @@ mod tests {
             max_text_bytes: 100,
             max_image_bytes: 50,
             sync_images: true,
+            sync_html: true,
         }
     }
 
@@ -451,6 +478,45 @@ mod tests {
             c.on_remote(remote("p", ClipKind::Image(vec![0; 5]), h(2))),
             RemoteAction::Skip(_)
         ));
+    }
+
+    #[test]
+    fn rich_text_degrades_to_plain() {
+        let html = |h: &str, t: &str| ClipKind::Html {
+            html: h.into(),
+            text: t.into(),
+        };
+        let mut c = SyncCore::new("me".into(), limits());
+        let LocalAction::Send(clip) = c.on_local(html("<b>a</b>", "a"), h(1)) else {
+            panic!()
+        };
+        assert_eq!(clip.kind, html("<b>a</b>", "a"));
+
+        // HTML over the limit: send the plain text instead of nothing.
+        let big = "x".repeat(101);
+        let LocalAction::Send(clip) = c.on_local(html(&big, "short"), h(2)) else {
+            panic!()
+        };
+        assert_eq!(clip.kind, text("short"));
+
+        // Plain text itself too large: nothing to send.
+        assert!(matches!(
+            c.on_local(html("<p>", &big), h(3)),
+            LocalAction::Ignore(_)
+        ));
+
+        // Rich text disabled: remote HTML is applied as plain text.
+        let mut plain = SyncCore::new(
+            "me".into(),
+            Limits {
+                sync_html: false,
+                ..limits()
+            },
+        );
+        assert_eq!(
+            plain.on_remote(remote("p", html("<i>b</i>", "b"), h(4))),
+            RemoteAction::Apply(text("b"))
+        );
     }
 
     #[test]

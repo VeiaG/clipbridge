@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::codec::LengthDelimitedCodec;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// v2: added `ClipKind::Html`.
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
 /// Text larger than this is never sent nor applied.
 pub const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -20,6 +21,11 @@ pub enum ClipKind {
     Text(String),
     /// PNG-encoded image. Raw RGBA never goes over the wire.
     Image(Vec<u8>),
+    /// Rich text plus its plain-text alternative.
+    Html {
+        html: String,
+        text: String,
+    },
 }
 
 impl ClipKind {
@@ -27,6 +33,7 @@ impl ClipKind {
         match self {
             ClipKind::Text(_) => "text",
             ClipKind::Image(_) => "image",
+            ClipKind::Html { .. } => "rich text",
         }
     }
 
@@ -34,6 +41,7 @@ impl ClipKind {
         match self {
             ClipKind::Text(t) => t.len(),
             ClipKind::Image(png) => png.len(),
+            ClipKind::Html { html, text } => html.len() + text.len(),
         }
     }
 }

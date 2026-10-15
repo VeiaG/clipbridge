@@ -19,6 +19,11 @@ use crate::protocol::{ClipKind, Hash};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawClip {
     Text(String),
+    /// Rich text: HTML plus the plain-text alternative apps put next to it.
+    Html {
+        html: String,
+        text: String,
+    },
     Image {
         width: usize,
         height: usize,
@@ -26,10 +31,24 @@ pub enum RawClip {
     },
 }
 
+/// Which optional formats to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Want {
+    pub images: bool,
+    pub html: bool,
+}
+
+impl Want {
+    pub const ALL: Want = Want {
+        images: true,
+        html: true,
+    };
+}
+
 pub trait ClipboardBackend: Send + 'static {
-    /// Current content; text wins when both text and an image are present.
+    /// Current content. Text (with its HTML, if any) wins over an image.
     /// `Ok(None)` when the clipboard is empty or holds an unsupported format.
-    fn read(&mut self, want_images: bool) -> Result<Option<RawClip>>;
+    fn read(&mut self, want: Want) -> Result<Option<RawClip>>;
     fn write(&mut self, clip: &RawClip) -> Result<()>;
 }
 
@@ -41,6 +60,12 @@ pub fn hash_raw(raw: &RawClip) -> Hash {
         RawClip::Text(t) => {
             h.update(b"text\0");
             h.update(t.as_bytes());
+        }
+        RawClip::Html { html, text } => {
+            h.update(b"html\0");
+            h.update(&(text.len() as u64).to_le_bytes());
+            h.update(text.as_bytes());
+            h.update(html.as_bytes());
         }
         RawClip::Image {
             width,
@@ -106,7 +131,7 @@ pub enum ReadOutcome {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ReadOpts {
-    pub want_images: bool,
+    pub want: Want,
     pub known: Option<Hash>,
 }
 
@@ -163,7 +188,7 @@ fn clipboard_thread(mut backend: Box<dyn ClipboardBackend>, rx: std_mpsc::Receiv
 }
 
 fn do_read(backend: &mut dyn ClipboardBackend, opts: ReadOpts) -> Result<ReadOutcome> {
-    let Some(raw) = backend.read(opts.want_images)? else {
+    let Some(raw) = backend.read(opts.want)? else {
         return Ok(ReadOutcome::Empty);
     };
     let hash = hash_raw(&raw);
@@ -172,6 +197,7 @@ fn do_read(backend: &mut dyn ClipboardBackend, opts: ReadOpts) -> Result<ReadOut
     }
     let kind = match raw {
         RawClip::Text(t) => ClipKind::Text(t),
+        RawClip::Html { html, text } => ClipKind::Html { html, text },
         RawClip::Image {
             width,
             height,
@@ -184,6 +210,7 @@ fn do_read(backend: &mut dyn ClipboardBackend, opts: ReadOpts) -> Result<ReadOut
 fn do_write(backend: &mut dyn ClipboardBackend, kind: ClipKind) -> Result<Hash> {
     let raw = match kind {
         ClipKind::Text(t) => RawClip::Text(t),
+        ClipKind::Html { html, text } => RawClip::Html { html, text },
         ClipKind::Image(png) => {
             let (width, height, rgba) = decode_png(&png)?;
             RawClip::Image {
@@ -194,10 +221,11 @@ fn do_write(backend: &mut dyn ClipboardBackend, kind: ClipKind) -> Result<Hash> 
         }
     };
     backend.write(&raw)?;
-    // The OS may not round-trip pixels exactly (premultiplied alpha, DIB conversion);
-    // report what the clipboard really holds so the echo of our own write is recognized.
-    if matches!(raw, RawClip::Image { .. })
-        && let Ok(Some(back)) = backend.read(true)
+    // The OS may not round-trip images and HTML exactly (premultiplied alpha, DIB
+    // conversion, CF_HTML wrapping); report what the clipboard really holds so the
+    // echo of our own write is recognized.
+    if !matches!(raw, RawClip::Text(_))
+        && let Ok(Some(back)) = backend.read(Want::ALL)
     {
         return Ok(hash_raw(&back));
     }
@@ -237,13 +265,21 @@ fn with_retry<T>(mut f: impl FnMut() -> Result<T, arboard::Error>) -> Result<T, 
 }
 
 impl ClipboardBackend for ArboardBackend {
-    fn read(&mut self, want_images: bool) -> Result<Option<RawClip>> {
+    fn read(&mut self, want: Want) -> Result<Option<RawClip>> {
         match with_retry(|| self.cb.get_text()) {
-            Ok(t) if !t.is_empty() => return Ok(Some(RawClip::Text(t))),
+            Ok(text) if !text.is_empty() => {
+                if want.html
+                    && let Ok(html) = with_retry(|| self.cb.get().html())
+                    && !html.trim().is_empty()
+                {
+                    return Ok(Some(RawClip::Html { html, text }));
+                }
+                return Ok(Some(RawClip::Text(text)));
+            }
             Ok(_) | Err(arboard::Error::ContentNotAvailable) => {}
             Err(e) => return Err(anyhow!("read clipboard text: {e}")),
         }
-        if !want_images {
+        if !want.images {
             return Ok(None);
         }
         match with_retry(|| self.cb.get_image()) {
@@ -261,6 +297,10 @@ impl ClipboardBackend for ArboardBackend {
         match clip {
             RawClip::Text(t) => with_retry(|| self.cb.set_text(t.as_str()))
                 .map_err(|e| anyhow!("write clipboard text: {e}")),
+            RawClip::Html { html, text } => {
+                with_retry(|| self.cb.set().html(html.as_str(), Some(text.as_str())))
+                    .map_err(|e| anyhow!("write clipboard HTML: {e}"))
+            }
             RawClip::Image {
                 width,
                 height,
@@ -329,7 +369,7 @@ pub mod mock {
     use anyhow::Result;
     use tokio::sync::watch;
 
-    use super::{ClipboardBackend, RawClip};
+    use super::{ClipboardBackend, RawClip, Want};
 
     #[derive(Default)]
     struct State {
@@ -378,9 +418,10 @@ pub mod mock {
     }
 
     impl ClipboardBackend for MockClipboard {
-        fn read(&mut self, want_images: bool) -> Result<Option<RawClip>> {
+        fn read(&mut self, want: Want) -> Result<Option<RawClip>> {
             Ok(match self.lock().content.clone() {
-                Some(RawClip::Image { .. }) if !want_images => None,
+                Some(RawClip::Image { .. }) if !want.images => None,
+                Some(RawClip::Html { text, .. }) if !want.html => Some(RawClip::Text(text)),
                 other => other,
             })
         }
@@ -451,7 +492,7 @@ mod tests {
         let (mock, mut changes) = MockClipboard::new();
         let handle = ClipboardHandle::spawn(Box::new(mock.clone())).unwrap();
         let opts = ReadOpts {
-            want_images: true,
+            want: Want::ALL,
             known: None,
         };
         assert_eq!(handle.read(opts).await.unwrap(), ReadOutcome::Empty);
@@ -482,10 +523,49 @@ mod tests {
         assert_eq!(mock.content(), Some(expected));
 
         let no_images = ReadOpts {
-            want_images: false,
+            want: Want {
+                images: false,
+                html: true,
+            },
             known: None,
         };
         assert_eq!(handle.read(no_images).await.unwrap(), ReadOutcome::Empty);
+
+        // Rich text: HTML travels with its plain-text alternative.
+        let html = ClipKind::Html {
+            html: "<b>bold</b>".into(),
+            text: "bold".into(),
+        };
+        handle.write(html.clone()).await.unwrap();
+        let ReadOutcome::Clip { kind, .. } = handle.read(opts).await.unwrap() else {
+            panic!("expected clip");
+        };
+        assert_eq!(kind, html);
+        let plain_only = ReadOpts {
+            want: Want {
+                images: true,
+                html: false,
+            },
+            known: None,
+        };
+        let ReadOutcome::Clip { kind, .. } = handle.read(plain_only).await.unwrap() else {
+            panic!("expected clip");
+        };
+        assert_eq!(kind, ClipKind::Text("bold".into()));
+    }
+
+    #[test]
+    fn html_hash_covers_both_parts() {
+        let a = hash_raw(&RawClip::Html {
+            html: "<b>x</b>".into(),
+            text: "x".into(),
+        });
+        let b = hash_raw(&RawClip::Html {
+            html: "<i>x</i>".into(),
+            text: "x".into(),
+        });
+        assert_ne!(a, b);
+        assert_ne!(a, hash_raw(&RawClip::Text("x".into())));
     }
 }
 
@@ -507,7 +587,7 @@ mod real_clipboard {
         };
         a.write(&img).unwrap();
         for i in 0..5 {
-            match b.read(true) {
+            match b.read(Want::ALL) {
                 Ok(Some(RawClip::Image { width, height, .. })) => {
                     assert_eq!((width, height), (64, 48));
                     println!("read ok on attempt {i}");
@@ -518,5 +598,30 @@ mod real_clipboard {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("could not read back image");
+    }
+}
+
+#[cfg(test)]
+mod real_clipboard_html {
+    use super::*;
+
+    /// Run manually: cargo test real_clipboard_html -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_clipboard_html_roundtrip() {
+        let mut a = ArboardBackend::new().unwrap();
+        let mut b = ArboardBackend::new().unwrap();
+        let clip = RawClip::Html {
+            html: "<p>Hello <b>bold</b> world</p>".into(),
+            text: "Hello bold world".into(),
+        };
+        a.write(&clip).unwrap();
+        let back = b.read(Want::ALL).unwrap();
+        println!("read back: {back:?}");
+        let Some(RawClip::Html { html, text }) = back else {
+            panic!("expected HTML back");
+        };
+        assert_eq!(text, "Hello bold world");
+        assert!(html.contains("<b>bold</b>"));
     }
 }
