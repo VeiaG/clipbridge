@@ -185,6 +185,15 @@ struct SettingsWindow {
 }
 
 impl SettingsWindow {
+    fn close(&mut self) {
+        if let Some(mut c) = self.child.take()
+            && matches!(c.try_wait(), Ok(None))
+        {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
     fn open(&mut self, passthrough: &[String]) {
         if let Some(c) = &mut self.child
             && matches!(c.try_wait(), Ok(None))
@@ -370,6 +379,10 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
                 }
             }
             Event::UserEvent(UserEvent::Exited) => {
+                // Close our settings window too. On macOS this also matters for
+                // updates: while it runs, `open ClipBridge.app` would just focus it
+                // instead of starting the new version.
+                settings.close();
                 tray = None; // removes the icon before exit
                 *control_flow = ControlFlow::Exit;
             }

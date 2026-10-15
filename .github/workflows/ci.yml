@@ -1,10 +1,10 @@
 name: CI
 
-# Checks only. Release binaries are built by release.yml on version tags.
+# Checks only, on pull requests or when started by hand (Actions → CI → Run workflow).
+# Release binaries are built by release.yml on version tags.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
