@@ -1,14 +1,16 @@
 name: CI
 
+# Checks only. Release binaries are built by release.yml on version tags.
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  check:
     strategy:
       fail-fast: false
       matrix:
@@ -31,13 +33,3 @@ jobs:
 
       - name: Test
         run: cargo test
-
-      - name: Build release
-        run: cargo build --release
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: clipbridge-${{ runner.os }}-${{ runner.arch }}
-          path: target/release/clipbridge${{ runner.os == 'Windows' && '.exe' || '' }}
-          if-no-files-found: error
