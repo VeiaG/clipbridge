@@ -67,8 +67,40 @@ fn sample(state: State, x: f32, y: f32) -> [f32; 4] {
     }
 }
 
+/// Monochrome "template" sample for the macOS menu bar: the system recolours it to
+/// match a light or dark bar, so only alpha matters. The glyph is cut out.
+fn sample_template(state: State, x: f32, y: f32) -> [f32; 4] {
+    let in_shape = BODY.contains(x, y) || CLIP.contains(x, y);
+    let in_glyph = BODY.contains(x, y) && glyph(state).iter().any(|s| s.contains(x, y));
+    // Paused / starting look dimmed, like other inactive menu-bar items.
+    let alpha = match state {
+        State::Active => 1.0,
+        _ => 0.5,
+    };
+    if in_shape && !in_glyph {
+        [0.0, 0.0, 0.0, alpha]
+    } else {
+        [0.0; 4]
+    }
+}
+
 /// RGBA8 pixels, `size`×`size`, anti-aliased with 4×4 supersampling.
 pub fn render(state: State, size: u32) -> Vec<u8> {
+    render_with(state, size, sample)
+}
+
+/// Monochrome template variant (see [`sample_template`]).
+pub fn render_template(state: State, size: u32) -> Vec<u8> {
+    render_with(state, size, sample_template)
+}
+
+/// Whether the macOS menu bar should show the monochrome template icon for this state.
+/// Problems stay coloured so they stand out.
+pub fn uses_template(state: State) -> bool {
+    matches!(state, State::Active | State::Paused | State::Starting)
+}
+
+fn render_with(state: State, size: u32, sample: fn(State, f32, f32) -> [f32; 4]) -> Vec<u8> {
     const SS: u32 = 4;
     let scale = 32.0 / size as f32;
     let mut out = Vec::with_capacity((size * size * 4) as usize);

@@ -31,12 +31,46 @@ pub struct TrayOptions {
 // ---------------------------------------------------------------------------------
 // Icons
 
-const ICON_SIZE: u32 = 32;
+/// Rendered larger than shown: macOS scales it to the menu bar (Retina), Windows to
+/// the notification area at the current DPI.
+const ICON_SIZE: u32 = 64;
 
-fn icon(state: State) -> Option<Icon> {
-    Icon::from_rgba(crate::icon::render(state, ICON_SIZE), ICON_SIZE, ICON_SIZE)
+/// Whether this platform/state shows a monochrome template icon (macOS menu bar).
+fn is_template(state: State) -> bool {
+    cfg!(target_os = "macos") && crate::icon::uses_template(state)
+}
+
+/// The icon for a state, plus whether it is a template image.
+fn icon(state: State) -> Option<(Icon, bool)> {
+    let template = is_template(state);
+    let rgba = if template {
+        crate::icon::render_template(state, ICON_SIZE)
+    } else {
+        crate::icon::render(state, ICON_SIZE)
+    };
+    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
         .map_err(|e| tracing::warn!("tray icon: {e}"))
         .ok()
+        .map(|i| (i, template))
+}
+
+fn builder_with_icon(b: TrayIconBuilder, icon: Icon, template: bool) -> TrayIconBuilder {
+    #[cfg(target_os = "macos")]
+    if template {
+        return b.with_icon_templated(icon);
+    }
+    let _ = template;
+    b.with_icon(icon)
+}
+
+fn set_tray_icon(tray: &TrayIcon, icon: Icon, template: bool) {
+    #[cfg(target_os = "macos")]
+    if template {
+        let _ = tray.set_icon_templated(Some(icon));
+        return;
+    }
+    let _ = template;
+    let _ = tray.set_icon(Some(icon));
 }
 
 // ---------------------------------------------------------------------------------
@@ -202,8 +236,8 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
                     let mut b = TrayIconBuilder::new()
                         .with_menu(Box::new(menu))
                         .with_tooltip("ClipBridge");
-                    if let Some(i) = icon(State::Starting) {
-                        b = b.with_icon(i);
+                    if let Some((i, template)) = icon(State::Starting) {
+                        b = builder_with_icon(b, i, template);
                     }
                     // Windows convention: left click opens the window, right click the menu.
                     #[cfg(target_os = "windows")]
@@ -223,8 +257,8 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
             Event::UserEvent(UserEvent::App(AppEvent::Status(status))) => {
                 if let Some((icon_handle, items)) = &tray {
                     let changed_state = last_status.as_ref().map(|s| s.state) != Some(status.state);
-                    if changed_state && let Some(i) = icon(status.state) {
-                        let _ = icon_handle.set_icon(Some(i));
+                    if changed_state && let Some((i, template)) = icon(status.state) {
+                        set_tray_icon(icon_handle, i, template);
                     }
                     let mut tip = format!("ClipBridge: {}", status.summary);
                     tip.truncate(120);

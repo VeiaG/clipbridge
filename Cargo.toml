@@ -1,6 +1,6 @@
 [package]
 name = "clipbridge"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Lightweight LAN clipboard sync tray app"
 publish = false
@@ -61,6 +61,10 @@ image.opt-level = 3
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Only for the settings window's activation policy; same version eframe uses.
+winit = { version = "0.30", default-features = false }
 
 [build-dependencies]
 winresource = "0.1.34"

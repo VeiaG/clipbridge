@@ -425,13 +425,23 @@ impl eframe::App for SettingsApp {
 pub fn run(config_path: PathBuf, passthrough: Vec<String>) -> anyhow::Result<()> {
     let cfg = Config::load_or_create(&config_path)?;
     let log_dir = config::default_log_dir();
-    let options = eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ClipBridge Settings")
             .with_inner_size([560.0, 720.0])
             .with_min_inner_size([420.0, 400.0]),
         ..Default::default()
     };
+    // The .app is menu-bar only (LSUIElement), and this process inherits that. Make the
+    // settings window a regular app so it shows in the Dock and Cmd+Tab while open.
+    #[cfg(target_os = "macos")]
+    {
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Regular);
+        }));
+    }
     eframe::run_native(
         "ClipBridge Settings",
         options,
