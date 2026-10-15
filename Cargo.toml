@@ -58,3 +58,9 @@ fdeflate.opt-level = 3
 miniz_oxide.opt-level = 3
 crc32fast.opt-level = 3
 image.opt-level = 3
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
+
+[build-dependencies]
+winresource = "0.1.34"

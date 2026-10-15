@@ -7,6 +7,7 @@ pub mod control;
 pub mod crypto;
 pub mod discovery;
 pub mod gui;
+pub mod icon;
 pub mod logging;
 pub mod net;
 pub mod node;

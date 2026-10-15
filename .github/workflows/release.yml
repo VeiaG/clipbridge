@@ -18,12 +18,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
       - run: cargo build --release
-      - name: Rename binary
+      - name: Portable exe
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir dist
-          cp target/release/clipbridge.exe "dist/ClipBridge-${VERSION}-windows-x64.exe"
+          cp target/release/clipbridge.exe "dist/ClipBridge-${VERSION}-windows-x64-portable.exe"
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+') { $version = "0.0.0" }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=$version" "/DSourceExe=$PWD\target\release\clipbridge.exe" packaging\windows\clipbridge.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -70,6 +81,7 @@ jobs:
             *System Settings → Privacy & Security* and click **Open Anyway**
             (or run `xattr -dr com.apple.quarantine /Applications/ClipBridge.app`).
 
-            **Windows**: run the `.exe`; allow it on private networks when Windows Firewall asks.
+            **Windows**: run the `-setup.exe` (no admin needed). The `-portable.exe` runs without installing.
+            Allow ClipBridge on private networks when Windows Firewall asks.
 
             Set the same passphrase on every machine in Settings (tray icon → Settings…).

@@ -29,62 +29,12 @@ pub struct TrayOptions {
 }
 
 // ---------------------------------------------------------------------------------
-// Icons, drawn in code: a clipboard silhouette whose colour shows the state.
+// Icons
 
 const ICON_SIZE: u32 = 32;
 
-fn state_color(state: State) -> [u8; 3] {
-    match state {
-        State::Active => [0x2e, 0xa0, 0x5b],
-        State::Paused => [0x8a, 0x8f, 0x98],
-        State::NotConfigured | State::Starting => [0xe0, 0x9a, 0x2a],
-        State::Error => [0xd6, 0x45, 0x45],
-    }
-}
-
-fn icon_rgba(state: State) -> Vec<u8> {
-    let s = ICON_SIZE as i32;
-    let [r, g, b] = state_color(state);
-    let dark = [r / 2, g / 2, b / 2];
-    let mut px = vec![0u8; (s * s * 4) as usize];
-    let mut put = |x: i32, y: i32, c: [u8; 3]| {
-        let i = ((y * s + x) * 4) as usize;
-        px[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
-    };
-    let in_rounded = |x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, rad: i32| {
-        if x < x0 || x > x1 || y < y0 || y > y1 {
-            return false;
-        }
-        let cx = x.clamp(x0 + rad, x1 - rad);
-        let cy = y.clamp(y0 + rad, y1 - rad);
-        (x - cx).pow(2) + (y - cy).pow(2) <= rad * rad
-    };
-    for y in 0..s {
-        for x in 0..s {
-            if in_rounded(x, y, 11, 1, 20, 7, 2) {
-                put(x, y, dark); // clip
-            } else if in_rounded(x, y, 4, 4, 27, 31, 4) {
-                let line = (9..=22).contains(&x) && matches!(y, 12..=13 | 18..=19 | 24..=25);
-                let paused_bars = state == State::Paused
-                    && (11..=24).contains(&y)
-                    && matches!(x, 11..=13 | 18..=20);
-                let white = if state == State::Paused {
-                    paused_bars
-                } else if state == State::Active {
-                    line
-                } else {
-                    // "!" mark
-                    (15..=16).contains(&x) && (matches!(y, 10..=20) || matches!(y, 24..=25))
-                };
-                put(x, y, if white { [255, 255, 255] } else { [r, g, b] });
-            }
-        }
-    }
-    px
-}
-
 fn icon(state: State) -> Option<Icon> {
-    Icon::from_rgba(icon_rgba(state), ICON_SIZE, ICON_SIZE)
+    Icon::from_rgba(crate::icon::render(state, ICON_SIZE), ICON_SIZE, ICON_SIZE)
         .map_err(|e| tracing::warn!("tray icon: {e}"))
         .ok()
 }
@@ -126,9 +76,14 @@ pub fn open_path(path: &Path, as_text: bool) {
 
 fn auto_launch(args: &[String]) -> Result<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe().context("locate executable")?;
+    // The Run registry value is a command line: quote the path in case it has spaces.
+    #[cfg(target_os = "windows")]
+    let path = format!("\"{}\"", exe.display());
+    #[cfg(not(target_os = "windows"))]
+    let path = exe.to_string_lossy().into_owned();
     let mut b = auto_launch::AutoLaunchBuilder::new();
     b.set_app_name("ClipBridge")
-        .set_app_path(&exe.to_string_lossy())
+        .set_app_path(&path)
         .set_args(args);
     #[cfg(target_os = "macos")]
     b.set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent);
@@ -335,22 +290,14 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    /// Writes the real autostart entry, then removes it.
+    /// Run manually: cargo test autostart -- --ignored
     #[test]
-    fn icons_differ_per_state() {
-        let states = [
-            State::Active,
-            State::Paused,
-            State::NotConfigured,
-            State::Error,
-        ];
-        let icons: Vec<_> = states.iter().map(|s| icon_rgba(*s)).collect();
-        for (i, a) in icons.iter().enumerate() {
-            assert_eq!(a.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
-            for b in &icons[i + 1..] {
-                assert_ne!(a, b);
-            }
-        }
+    #[ignore]
+    fn autostart_roundtrip() {
+        super::set_autostart(&[], true).unwrap();
+        assert!(super::autostart_enabled(&[]));
+        super::set_autostart(&[], false).unwrap();
+        assert!(!super::autostart_enabled(&[]));
     }
 }

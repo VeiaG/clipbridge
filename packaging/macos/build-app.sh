@@ -14,6 +14,18 @@ mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/clipbridge"
 chmod +x "$APP/Contents/MacOS/clipbridge"
 sed "s/__VERSION__/$VERSION/g" "$HERE/Info.plist" > "$APP/Contents/Info.plist"
+
+# App icon: build an .iconset from the 1024px master and convert it to .icns.
+ICONSET="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$ICONSET"
+MASTER="$HERE/../../assets/icon-1024.png"
+for s in 16 32 128 256 512; do
+  sips -z $s $s "$MASTER" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  d=$((s * 2))
+  sips -z $d $d "$MASTER" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+mkdir -p "$APP/Contents/Resources"
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 plutil -lint "$APP/Contents/Info.plist"
 
 # Ad-hoc signature (free, no Apple Developer account). Apple Silicon refuses to run
