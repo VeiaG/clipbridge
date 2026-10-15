@@ -224,7 +224,10 @@ fn with_retry<T>(mut f: impl FnMut() -> Result<T, arboard::Error>) -> Result<T, 
     let mut attempt = 0;
     loop {
         match f() {
-            Err(arboard::Error::ClipboardOccupied) if attempt < 5 => {
+            // "Unknown" errors show up when another process is mid-write; retry those too.
+            Err(arboard::Error::ClipboardOccupied | arboard::Error::Unknown { .. })
+                if attempt < 5 =>
+            {
                 attempt += 1;
                 std::thread::sleep(std::time::Duration::from_millis(40 * attempt));
             }
@@ -483,5 +486,37 @@ mod tests {
             known: None,
         };
         assert_eq!(handle.read(no_images).await.unwrap(), ReadOutcome::Empty);
+    }
+}
+
+/// Touches the real OS clipboard; run manually: cargo test real_clipboard -- --ignored
+#[cfg(test)]
+mod real_clipboard {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn real_clipboard_image_roundtrip() {
+        let mut a = ArboardBackend::new().unwrap();
+        let mut b = ArboardBackend::new().unwrap();
+        let rgba: Vec<u8> = (0..64 * 48 * 4).map(|i| (i % 256) as u8 | 0x80).collect();
+        let img = RawClip::Image {
+            width: 64,
+            height: 48,
+            rgba,
+        };
+        a.write(&img).unwrap();
+        for i in 0..5 {
+            match b.read(true) {
+                Ok(Some(RawClip::Image { width, height, .. })) => {
+                    assert_eq!((width, height), (64, 48));
+                    println!("read ok on attempt {i}");
+                    return;
+                }
+                other => println!("attempt {i}: {other:?}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("could not read back image");
     }
 }

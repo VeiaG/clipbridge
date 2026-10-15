@@ -27,7 +27,7 @@ use crate::protocol::{self, Clip, Message, PROTOCOL_VERSION};
 const HANDSHAKE_MAX_FRAME: usize = 64 * 1024;
 /// Per-peer queue of outgoing clips. A peer this far behind is dropping clips.
 const PEER_QUEUE: usize = 8;
-const TICK: Duration = Duration::from_millis(500);
+const TICK: Duration = Duration::from_secs(1);
 /// A tick gap this large means the machine slept (or the clock jumped).
 const WAKE_GAP: Duration = Duration::from_secs(10);
 
