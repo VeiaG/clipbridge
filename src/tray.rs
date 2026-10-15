@@ -162,6 +162,24 @@ pub fn set_autostart(args: &[String], enable: bool) -> Result<()> {
     }
 }
 
+/// Windows only lets the process the user just clicked bring windows to the front.
+/// Pass that right on, so the settings window doesn't open behind everything.
+#[cfg(target_os = "windows")]
+fn allow_child_foreground() {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn AllowSetForegroundWindow(process_id: u32) -> i32;
+    }
+    const ASFW_ANY: u32 = u32::MAX;
+    // SAFETY: plain Win32 call with no pointers; failure only means no focus change.
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn allow_child_foreground() {}
+
 struct SettingsWindow {
     child: Option<Child>,
 }
@@ -180,6 +198,7 @@ impl SettingsWindow {
                 return;
             }
         };
+        allow_child_foreground();
         match std::process::Command::new(exe)
             .arg("--settings")
             .args(passthrough)
