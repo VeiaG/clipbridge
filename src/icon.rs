@@ -94,6 +94,19 @@ pub fn render_template(state: State, size: u32) -> Vec<u8> {
     render_with(state, size, sample_template)
 }
 
+/// Places `art`×`art` RGBA pixels centred on a transparent `canvas`×`canvas` square.
+pub fn pad_center(rgba: &[u8], art: u32, canvas: u32) -> Vec<u8> {
+    let off = (canvas - art) / 2;
+    let mut out = vec![0u8; (canvas * canvas * 4) as usize];
+    let row = (art * 4) as usize;
+    for y in 0..art {
+        let src = (y * art * 4) as usize;
+        let dst = (((y + off) * canvas + off) * 4) as usize;
+        out[dst..dst + row].copy_from_slice(&rgba[src..src + row]);
+    }
+    out
+}
+
 /// Whether the macOS menu bar should show the monochrome template icon for this state.
 /// Problems stay coloured so they stand out.
 pub fn uses_template(state: State) -> bool {

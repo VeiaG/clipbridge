@@ -430,7 +430,14 @@ pub fn run(config_path: PathBuf, passthrough: Vec<String>) -> anyhow::Result<()>
         viewport: egui::ViewportBuilder::default()
             .with_title("ClipBridge Settings")
             .with_inner_size([560.0, 720.0])
-            .with_min_inner_size([420.0, 400.0]),
+            .with_min_inner_size([420.0, 400.0])
+            // Our icon, not eframe's default (which also becomes the Dock icon on macOS).
+            // Same margins as the .app icon so the two match.
+            .with_icon(std::sync::Arc::new(egui::IconData {
+                rgba: crate::icon::pad_center(&crate::icon::render(State::Active, 412), 412, 512),
+                width: 512,
+                height: 512,
+            })),
         ..Default::default()
     };
     // The .app is menu-bar only (LSUIElement), and this process inherits that. Make the

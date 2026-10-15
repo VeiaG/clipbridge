@@ -43,8 +43,16 @@ fn is_template(state: State) -> bool {
 /// The icon for a state, plus whether it is a template image.
 fn icon(state: State) -> Option<(Icon, bool)> {
     let template = is_template(state);
-    let rgba = if template {
-        crate::icon::render_template(state, ICON_SIZE)
+    let rgba = if cfg!(target_os = "macos") {
+        // tray-icon stretches the image to the full 22pt menu-bar height; keep the
+        // artwork near the ~15pt of system icons by leaving a margin.
+        let art = ICON_SIZE * 2 / 3;
+        let inner = if template {
+            crate::icon::render_template(state, art)
+        } else {
+            crate::icon::render(state, art)
+        };
+        crate::icon::pad_center(&inner, art, ICON_SIZE)
     } else {
         crate::icon::render(state, ICON_SIZE)
     };
