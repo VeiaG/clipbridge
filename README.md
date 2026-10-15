@@ -143,8 +143,8 @@ sleep/wake, all connections are re-established right away.
   as plain text.
 - Peers must run the same protocol version: update all machines together
   (0.1.0 cannot talk to newer versions).
-- Text is limited to 2 MB; images to `max_image_mb`, which can't go above 30 MB
-  because of the 32 MB frame limit.
+- Text is limited to 10 MB (HTML formatting too; larger HTML falls back to plain
+  text). Images to `max_image_mb`, at most 30 MB because of the 32 MB frame limit.
 - Peers must be on the same LAN or reachable via manual `host:port` entries.
   There's no relay through the internet.
 - The passphrase is the only secret. Anyone who knows it and can reach the port

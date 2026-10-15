@@ -11,8 +11,9 @@ use uuid::Uuid;
 /// v2: added `ClipKind::Html`.
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
-/// Text larger than this is never sent nor applied.
-pub const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+/// Text (and, separately, its HTML) larger than this is not synced. Both together
+/// stay well under [`MAX_FRAME`].
+pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 
 pub type Hash = [u8; 32];
 
