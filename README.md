@@ -23,7 +23,7 @@ cargo build --release
 ```
 
 The binary ends up at `target/release/clipbridge` (`clipbridge.exe` on Windows).
-CI builds both platforms on every push; download them from the run's **Artifacts**.
+Ready-made builds are on the [Releases](../../releases) page.
 
 ### Windows
 
@@ -35,17 +35,31 @@ CI builds both platforms on every push; download them from the run's **Artifacts
   *Windows Security → Firewall → Allow an app through firewall*.
 - Left-click the tray icon to open Settings; right-click for the menu.
 
-### macOS
+### macOS (Apple Silicon)
 
-- Run `clipbridge`. It lives in the menu bar only and has no Dock icon.
-- The binary is not signed, so **Gatekeeper** blocks it the first time. Clear the
-  quarantine flag:
+- Download `ClipBridge-<version>-macos-arm64.dmg` from
+  [Releases](../../releases), open it, and drag **ClipBridge** to **Applications**.
+- The app is ad-hoc signed but not notarized (that needs a paid Apple Developer
+  account), so **Gatekeeper** blocks the first launch. Open *System Settings →
+  Privacy & Security* and click **Open Anyway**, or run:
 
   ```sh
-  xattr -d com.apple.quarantine /path/to/clipbridge
+  xattr -dr com.apple.quarantine /Applications/ClipBridge.app
   ```
-- macOS 15+ may ask for **Local Network** access. Allow it, otherwise peers can't
-  be found or reached.
+- It lives in the menu bar only and has no Dock icon.
+- macOS 15+ asks for **Local Network** access. Allow it, otherwise peers can't be
+  found or reached.
+- To build the bundle yourself:
+  `cargo build --release && packaging/macos/build-app.sh target/release/clipbridge 0.1.0 dist`
+
+## Releases
+
+Push a version tag and CI builds the Windows `.exe` and the macOS `.dmg`, then
+attaches both to a GitHub Release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
 
 ## First-time setup
 
@@ -123,7 +137,7 @@ sleep/wake, all connections are re-established right away.
   There's no relay through the internet.
 - The passphrase is the only secret. Anyone who knows it and can reach the port
   can read and write your clipboard. Choose a long one.
-- macOS is not packaged as an `.app` bundle and is not signed or notarized.
+- The macOS build is Apple Silicon only, ad-hoc signed, not notarized, and has no custom app icon yet.
 - Linux may work (X11) but isn't tested or supported.
 
 ## Development

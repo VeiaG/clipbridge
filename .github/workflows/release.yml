@@ -1,0 +1,75 @@
+name: Release
+
+# Push a tag like v0.1.0 to build binaries and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - name: Rename binary
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir dist
+          cp target/release/clipbridge.exe "dist/ClipBridge-${VERSION}-windows-x64.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest # Apple Silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - name: Build .app and .dmg
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir dist
+          packaging/macos/build-app.sh target/release/clipbridge "$VERSION" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            **macOS** (Apple Silicon): open the `.dmg`, drag ClipBridge to Applications.
+            The app is not notarized, so the first launch is blocked: open
+            *System Settings → Privacy & Security* and click **Open Anyway**
+            (or run `xattr -dr com.apple.quarantine /Applications/ClipBridge.app`).
+
+            **Windows**: run the `.exe`; allow it on private networks when Windows Firewall asks.
+
+            Set the same passphrase on every machine in Settings (tray icon → Settings…).

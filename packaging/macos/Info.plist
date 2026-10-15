@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ClipBridge</string>
+    <key>CFBundleDisplayName</key>
+    <string>ClipBridge</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.clipbridge.ClipBridge</string>
+    <key>CFBundleExecutable</key>
+    <string>clipbridge</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <!-- Menu-bar only: no Dock icon, no app switcher entry. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- macOS 15+ asks for Local Network access with this text. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ClipBridge syncs your clipboard with your other computers on this network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_clipbridge._tcp</string>
+    </array>
+</dict>
+</plist>
