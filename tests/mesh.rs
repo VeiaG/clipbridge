@@ -239,3 +239,40 @@ async fn oversized_text_is_not_sent() {
     a.mock.copy(RawClip::Text("small".into()));
     eventually("small text arrives", || b.mock.content() == text("small")).await;
 }
+
+/// Needs working multicast on the host, so it is not run in CI.
+/// Run with: cargo test --test mesh -- --ignored
+#[tokio::test]
+#[ignore]
+async fn mdns_discovery_connects() {
+    async fn start(name: &str) -> (MockClipboard, NodeHandle, watch::Sender<bool>) {
+        let (mock, changes) = MockClipboard::new();
+        let clipboard = ClipboardHandle::spawn(Box::new(mock.clone())).unwrap();
+        let config = Config {
+            device_name: name.into(),
+            passphrase: "right".into(),
+            port: 0,
+            ..Config::default()
+        };
+        let (paused_tx, paused) = watch::channel(false);
+        let params = NodeParams {
+            timing: fast_timing(),
+            ..NodeParams::new(config, cipher("right"), paused)
+        };
+        let handle = node::start(params, clipboard, changes).await.unwrap();
+        (mock, handle, paused_tx)
+    }
+    let (a_mock, a, _pa) = start("mdns-a").await;
+    let (b_mock, b, _pb) = start("mdns-b").await;
+    let connected =
+        || a.net_status.borrow().peers.len() == 1 && b.net_status.borrow().peers.len() == 1;
+    for _ in 0..200 {
+        if connected() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(connected(), "peers did not find each other via mDNS");
+    a_mock.copy(RawClip::Text("via mdns".into()));
+    eventually("b receives", || b_mock.content() == text("via mdns")).await;
+}
