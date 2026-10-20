@@ -17,8 +17,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::AppStatus;
+use crate::transfer::{TransferInfo, Watcher};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Room for a long list of dropped paths.
+const MAX_REQUEST: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
     Status,
@@ -28,6 +32,26 @@ pub enum Command {
     OpenSettings,
     CheckUpdates,
     InstallUpdate,
+    /// Send files and folders to these device ids.
+    SendFiles {
+        paths: Vec<String>,
+        peers: Vec<String>,
+    },
+    /// List transfers; also marks that window as open.
+    Transfers {
+        watcher: Watcher,
+    },
+    CancelTransfer {
+        id: u64,
+    },
+    /// Answer to an incoming offer.
+    Decide {
+        id: u64,
+        accept: bool,
+    },
+    ClearFinished {
+        outgoing: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +67,8 @@ pub struct Response {
     pub status: Option<Box<AppStatus>>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub transfers: Option<Vec<TransferInfo>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,7 +133,7 @@ async fn handle(
 ) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
-    let mut reader = tokio::io::BufReader::new(read).take(16 * 1024);
+    let mut reader = tokio::io::BufReader::new(read).take(MAX_REQUEST);
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let reply = match serde_json::from_str::<Request>(&line) {
         Ok(req) if req.token == token => {
@@ -135,6 +161,7 @@ pub fn error_response(msg: &str) -> Response {
         ok: false,
         status: None,
         error: Some(msg.to_string()),
+        transfers: None,
     }
 }
 

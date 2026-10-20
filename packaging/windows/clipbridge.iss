@@ -38,7 +38,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "clipbridge.exe"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\ClipBridge"; Filename: "{app}\clipbridge.exe"
+Name: "{userprograms}\ClipBridge"; Filename: "{app}\clipbridge.exe"; AppUserModelID: "dev.clipbridge.ClipBridge"
 Name: "{userdesktop}\ClipBridge"; Filename: "{app}\clipbridge.exe"; Tasks: desktopicon
 
 [Registry]

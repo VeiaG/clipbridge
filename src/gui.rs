@@ -18,9 +18,9 @@ use crate::logging;
 
 const LOG_LINES: usize = 80;
 
-const GREEN: egui::Color32 = egui::Color32::from_rgb(46, 160, 91);
+pub(crate) const GREEN: egui::Color32 = egui::Color32::from_rgb(46, 160, 91);
 const AMBER: egui::Color32 = egui::Color32::from_rgb(224, 154, 42);
-const RED: egui::Color32 = egui::Color32::from_rgb(214, 69, 69);
+pub(crate) const RED: egui::Color32 = egui::Color32::from_rgb(214, 69, 69);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -30,7 +30,7 @@ enum Tab {
 }
 
 /// Status dot, painted (the default egui font has no "●" glyph).
-fn dot(ui: &mut egui::Ui, color: egui::Color32, filled: bool) {
+pub(crate) fn dot(ui: &mut egui::Ui, color: egui::Color32, filled: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
     let (c, r) = (rect.center(), 4.5);
     if filled {
@@ -51,7 +51,7 @@ fn state_color(state: State) -> egui::Color32 {
 }
 
 /// A titled group of controls.
-fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(title).strong().size(15.0));
     ui.add_space(2.0);
@@ -59,7 +59,7 @@ fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// A full-width framed box.
-fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     const MARGIN: i8 = 10;
     // Frame width = content + 2 × (margin + 1 px stroke); keep it inside the window.
     let width = ui.available_width() - 2.0 * (MARGIN as f32 + 1.0);
@@ -72,7 +72,7 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// Grey explanatory text under a control.
-fn hint(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).small().weak());
 }
 
@@ -443,6 +443,40 @@ impl SettingsApp {
             hint(ui, "Plain text always syncs.");
         });
 
+        section(ui, "Receiving files", |ui| {
+            ui.checkbox(
+                &mut self.cfg.receive_files,
+                "Accept files other devices send",
+            );
+            ui.add_enabled(
+                self.cfg.receive_files,
+                egui::Checkbox::new(&mut self.cfg.ask_before_receive, "Ask before accepting"),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Save to");
+                let default = config::default_receive_dir().display().to_string();
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cfg.receive_dir)
+                        .desired_width(230.0)
+                        .hint_text(default),
+                );
+                if ui.button("Choose…").clicked()
+                    && let Some(dir) = rfd::FileDialog::new()
+                        .set_directory(self.cfg.receive_dir())
+                        .pick_folder()
+                {
+                    self.cfg.receive_dir = dir.display().to_string();
+                }
+                if ui.button("Open").clicked() {
+                    let dir = self.cfg.receive_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    crate::tray::open_path(&dir, false);
+                }
+            });
+            hint(ui, "Send files from the tray menu: Send files…");
+        });
+
         section(ui, "General", |ui| {
             if ui.checkbox(&mut self.autostart, "Start at login").changed() {
                 let want = self.autostart;
@@ -656,16 +690,18 @@ impl eframe::App for SettingsApp {
     }
 }
 
-pub fn run(config_path: PathBuf, passthrough: Vec<String>) -> anyhow::Result<()> {
-    let cfg = Config::load_or_create(&config_path)?;
-    let log_dir = config::default_log_dir();
-    let autostart = crate::tray::autostart_enabled(&passthrough);
+/// Window setup shared by the settings and transfer windows.
+pub(crate) fn window_options(
+    title: &str,
+    size: [f32; 2],
+    min_size: [f32; 2],
+) -> eframe::NativeOptions {
     #[allow(unused_mut)]
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ClipBridge")
-            .with_inner_size([520.0, 600.0])
-            .with_min_inner_size([440.0, 420.0])
+            .with_title(title)
+            .with_inner_size(size)
+            .with_min_inner_size(min_size)
             // Our icon, not eframe's default. On macOS it becomes the Dock icon, so use
             // the same rounded-square artwork as the .app.
             .with_icon(std::sync::Arc::new(egui::IconData {
@@ -688,6 +724,14 @@ pub fn run(config_path: PathBuf, passthrough: Vec<String>) -> anyhow::Result<()>
             builder.with_activation_policy(ActivationPolicy::Regular);
         }));
     }
+    options
+}
+
+pub fn run(config_path: PathBuf, passthrough: Vec<String>) -> anyhow::Result<()> {
+    let cfg = Config::load_or_create(&config_path)?;
+    let log_dir = config::default_log_dir();
+    let autostart = crate::tray::autostart_enabled(&passthrough);
+    let options = window_options("ClipBridge", [520.0, 600.0], [440.0, 420.0]);
     eframe::run_native(
         "ClipBridge Settings",
         options,

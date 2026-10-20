@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clipbridge::app::{self, AppEvent, AppOptions, UiCmd};
-use clipbridge::{clipboard, config, control, gui, logging, tray};
+use clipbridge::{clipboard, config, control, gui, logging, notify, transfer_gui, tray};
 use tokio::sync::mpsc;
 
 const USAGE: &str = "\
@@ -17,6 +17,7 @@ OPTIONS:
   --headless       No tray icon; log to stderr; stop with Ctrl+C
   --verbose        Debug logging
   --settings       Open the settings window (talks to the running instance)
+  --send [paths]   Open the Send files window, optionally with files already added
   -h, --help       Show this help
 ";
 
@@ -25,6 +26,11 @@ struct Args {
     headless: bool,
     verbose: bool,
     settings: bool,
+    /// `--send`, with the paths after it.
+    send: Option<Vec<PathBuf>>,
+    incoming: bool,
+    /// Internal: show one notification and exit.
+    notify: Option<(String, String)>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -33,6 +39,9 @@ fn parse_args() -> Result<Args> {
         headless: false,
         verbose: false,
         settings: false,
+        send: None,
+        incoming: false,
+        notify: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -41,6 +50,16 @@ fn parse_args() -> Result<Args> {
             "--headless" => args.headless = true,
             "--verbose" | "-v" => args.verbose = true,
             "--settings" => args.settings = true,
+            "--incoming" => args.incoming = true,
+            "--notify" => {
+                let title = it.next().context("--notify needs a title")?;
+                let body = it.next().context("--notify needs a body")?;
+                args.notify = Some((title, body));
+            }
+            // Everything after it is a path (it comes from a file manager).
+            "--send" => {
+                args.send = Some(it.by_ref().map(PathBuf::from).collect());
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -72,8 +91,17 @@ fn real_main() -> Result<()> {
         None => Vec::new(),
     };
 
-    if args.settings {
+    if let Some((title, body)) = &args.notify {
+        return notify::show(title, body);
+    }
+    if args.settings || args.send.is_some() || args.incoming {
         let _ = logging::init(None, args.verbose, true);
+        if let Some(paths) = args.send {
+            return transfer_gui::run_send(config_path, paths);
+        }
+        if args.incoming {
+            return transfer_gui::run_incoming(config_path);
+        }
         return gui::run(config_path, passthrough);
     }
 

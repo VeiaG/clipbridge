@@ -1,6 +1,7 @@
 //! In-process multi-node tests over loopback TCP with mock clipboards.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use clipbridge::config::Config;
 use clipbridge::crypto::Cipher;
 use clipbridge::net::Timing;
 use clipbridge::node::{self, NodeHandle, NodeParams};
+use clipbridge::transfer::{TransferInfo, TransferState};
 use tokio::sync::watch;
 
 fn cipher(pass: &str) -> Cipher {
@@ -52,6 +54,7 @@ impl TestNode {
             port,
             manual_peers: peers.iter().map(|a| a.to_string()).collect(),
             discovery: false,
+            receive_dir: temp_dir("recv").display().to_string(),
             ..Config::default()
         };
         let (paused, _) = watch::channel(false);
@@ -102,6 +105,62 @@ impl TestNode {
             .map(|h| h.net_status.borrow().peers.len())
             .unwrap_or(0)
     }
+}
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("clipbridge-{tag}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+impl TestNode {
+    fn hub(&self) -> &clipbridge::transfer::Hub {
+        &self.handle.as_ref().unwrap().hub
+    }
+
+    fn transfer(&self, outgoing: bool) -> Option<TransferInfo> {
+        self.hub()
+            .list()
+            .into_iter()
+            .rfind(|t| t.outgoing == outgoing)
+    }
+
+    fn send(&self, paths: &[&Path], to: &TestNode) -> u64 {
+        let paths = paths.iter().map(|p| p.to_path_buf()).collect();
+        self.handle
+            .as_ref()
+            .unwrap()
+            .send_files(paths, std::slice::from_ref(&to.config.device_id))
+            .unwrap()[0]
+    }
+
+    fn recv_dir(&self) -> PathBuf {
+        PathBuf::from(&self.config.receive_dir)
+    }
+}
+
+/// Every file under `dir`, relative, with its contents.
+fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            let rel = p
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if p.is_dir() {
+                out.push((format!("{rel}/"), Vec::new()));
+                walk(base, &p, out);
+            } else {
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
 }
 
 async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
@@ -295,4 +354,163 @@ async fn rich_text_propagates_with_plain_alternative() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(a.mock.writes().len(), 0);
     assert_eq!(b.mock.writes().len(), 1);
+}
+
+async fn pair(ask: bool) -> (TestNode, TestNode) {
+    let a = TestNode::start("a", 0, &[], "right").await;
+    let mut b = TestNode::start("b", 0, &[a.addr()], "right").await;
+    if ask {
+        b.config.ask_before_receive = true;
+        b.stop().await;
+        b.boot().await;
+    }
+    eventually("connected", || a.peer_count() == 1 && b.peer_count() == 1).await;
+    (a, b)
+}
+
+#[tokio::test]
+async fn files_and_folders_transfer() {
+    let (a, b) = pair(false).await;
+    let src = temp_dir("src");
+    let big: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.join("report.txt"), &big).unwrap();
+    let proj = src.join("proj");
+    std::fs::create_dir_all(proj.join("sub")).unwrap();
+    std::fs::create_dir_all(proj.join("empty")).unwrap();
+    std::fs::write(proj.join("sub").join("x.bin"), b"hello").unwrap();
+    std::fs::write(proj.join("zero"), b"").unwrap();
+    std::fs::write(proj.join(".DS_Store"), b"junk").unwrap();
+
+    a.send(&[&src.join("report.txt"), &proj], &b);
+    eventually("delivered", || {
+        a.transfer(true)
+            .is_some_and(|t| t.state == TransferState::Done)
+    })
+    .await;
+    let got = b.transfer(false).unwrap();
+    assert_eq!(got.state, TransferState::Done);
+    assert_eq!(got.files, 3);
+    assert_eq!(got.done_bytes, big.len() as u64 + 5);
+
+    let names: Vec<String> = tree(&b.recv_dir()).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        [
+            "proj/",
+            "proj/empty/",
+            "proj/sub/",
+            "proj/sub/x.bin",
+            "proj/zero",
+            "report.txt"
+        ]
+    );
+    assert_eq!(std::fs::read(b.recv_dir().join("report.txt")).unwrap(), big);
+
+    // Sending the same thing again never overwrites.
+    a.send(&[&src.join("report.txt")], &b);
+    eventually("second copy", || {
+        b.recv_dir().join("report (1).txt").exists()
+    })
+    .await;
+    eventually("second delivered", || {
+        a.transfer(true)
+            .is_some_and(|t| t.state == TransferState::Done)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn asked_receiver_can_decline() {
+    let (a, b) = pair(true).await;
+    let src = temp_dir("src");
+    std::fs::write(src.join("f.txt"), b"data").unwrap();
+    a.send(&[&src.join("f.txt")], &b);
+    eventually("asked", || {
+        b.transfer(false)
+            .is_some_and(|t| t.state == TransferState::Asking)
+    })
+    .await;
+    let id = b.transfer(false).unwrap().id;
+    b.hub().decide(id, false);
+    eventually("sender sees decline", || {
+        a.transfer(true)
+            .is_some_and(|t| matches!(t.state, TransferState::Declined(_)))
+    })
+    .await;
+    assert!(
+        tree(&b.recv_dir()).is_empty(),
+        "nothing saved, no partial left"
+    );
+}
+
+#[tokio::test]
+async fn asked_receiver_can_accept() {
+    let (a, b) = pair(true).await;
+    let src = temp_dir("src");
+    std::fs::write(src.join("f.txt"), b"data").unwrap();
+    a.send(&[&src.join("f.txt")], &b);
+    eventually("asked", || {
+        b.transfer(false)
+            .is_some_and(|t| t.state == TransferState::Asking)
+    })
+    .await;
+    assert_eq!(a.transfer(true).unwrap().state, TransferState::Waiting);
+    b.hub().decide(b.transfer(false).unwrap().id, true);
+    eventually("delivered", || {
+        a.transfer(true)
+            .is_some_and(|t| t.state == TransferState::Done)
+    })
+    .await;
+    assert_eq!(std::fs::read(b.recv_dir().join("f.txt")).unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn cancel_mid_transfer_cleans_up_and_clipboard_keeps_syncing() {
+    let (a, b) = pair(false).await;
+    let src = temp_dir("src");
+    let big = vec![7u8; 64 * 1024 * 1024];
+    std::fs::write(src.join("big.bin"), &big).unwrap();
+    let id = a.send(&[&src.join("big.bin")], &b);
+    eventually("running", || {
+        b.transfer(false).is_some_and(|t| t.done_bytes > 0)
+    })
+    .await;
+
+    a.mock.copy(RawClip::Text("during transfer".into()));
+    eventually("clip arrives", || {
+        b.mock.content() == text("during transfer")
+    })
+    .await;
+
+    a.hub().cancel(id);
+    eventually("receiver stops", || {
+        b.transfer(false).is_some_and(|t| t.state.finished())
+    })
+    .await;
+    assert_eq!(a.transfer(true).unwrap().state, TransferState::Cancelled);
+    assert!(
+        matches!(b.transfer(false).unwrap().state, TransferState::Failed(_)),
+        "receiver: {:?}",
+        b.transfer(false).unwrap().state
+    );
+    assert!(tree(&b.recv_dir()).is_empty(), "partial folder removed");
+}
+
+#[tokio::test]
+async fn turned_off_receiver_declines() {
+    let a = TestNode::start("a", 0, &[], "right").await;
+    let mut b = TestNode::start("b", 0, &[a.addr()], "right").await;
+    b.config.receive_files = false;
+    b.stop().await;
+    b.boot().await;
+    eventually("connected", || a.peer_count() == 1 && b.peer_count() == 1).await;
+    let src = temp_dir("src");
+    std::fs::write(src.join("f.txt"), b"data").unwrap();
+    a.send(&[&src.join("f.txt")], &b);
+    eventually("declined", || {
+        a.transfer(true)
+            .is_some_and(|t| matches!(t.state, TransferState::Declined(_)))
+    })
+    .await;
+    assert!(b.transfer(false).is_none());
 }

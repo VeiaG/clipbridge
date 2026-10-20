@@ -31,6 +31,12 @@ pub struct Config {
     pub check_updates: bool,
     /// Install new versions without asking.
     pub auto_update: bool,
+    /// Accept files other devices send. Off: offers are declined.
+    pub receive_files: bool,
+    /// Ask before accepting a transfer instead of accepting right away.
+    pub ask_before_receive: bool,
+    /// Where received files go; empty means `Downloads/ClipBridge`.
+    pub receive_dir: String,
 }
 
 impl Default for Config {
@@ -47,6 +53,9 @@ impl Default for Config {
             discovery: true,
             check_updates: true,
             auto_update: false,
+            receive_files: true,
+            ask_before_receive: false,
+            receive_dir: String::new(),
         }
     }
 }
@@ -60,6 +69,15 @@ impl Config {
 
     pub fn max_image_bytes(&self) -> usize {
         self.max_image_mb.clamp(1, MAX_IMAGE_MB_CAP) as usize * 1024 * 1024
+    }
+
+    pub fn receive_dir(&self) -> PathBuf {
+        let custom = self.receive_dir.trim();
+        if custom.is_empty() {
+            default_receive_dir()
+        } else {
+            PathBuf::from(custom)
+        }
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -114,6 +132,7 @@ const HEADER: &str = "\
 # ClipBridge configuration.
 # Set the SAME passphrase on every machine that should share a clipboard.
 # manual_peers: extra peers as \"host:port\", for networks where mDNS discovery fails.
+# receive_dir: where received files go; empty means Downloads/ClipBridge.
 # Changes are picked up automatically within a few seconds.
 
 ";
@@ -132,6 +151,14 @@ pub fn default_log_dir() -> PathBuf {
     project_dirs()
         .map(|d| d.data_local_dir().join("logs"))
         .unwrap_or_else(|| PathBuf::from("logs"))
+}
+
+pub fn default_receive_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|d| d.download_dir().map(|p| p.to_path_buf()))
+        .or_else(|| directories::UserDirs::new().map(|d| d.home_dir().join("Downloads")))
+        .unwrap_or_else(|| PathBuf::from("Downloads"))
+        .join("ClipBridge")
 }
 
 pub fn default_device_name() -> String {

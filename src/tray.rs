@@ -180,11 +180,17 @@ fn allow_child_foreground() {
 #[cfg(not(target_os = "windows"))]
 fn allow_child_foreground() {}
 
-struct SettingsWindow {
+/// One of our window processes (`--settings`, `--send`, `--incoming`).
+struct ChildWindow {
+    arg: &'static str,
     child: Option<Child>,
 }
 
-impl SettingsWindow {
+impl ChildWindow {
+    fn new(arg: &'static str) -> Self {
+        Self { arg, child: None }
+    }
+
     fn close(&mut self) {
         if let Some(mut c) = self.child.take()
             && matches!(c.try_wait(), Ok(None))
@@ -208,13 +214,14 @@ impl SettingsWindow {
             }
         };
         allow_child_foreground();
+        // Passthrough first: `--send` takes everything after it as paths.
         match std::process::Command::new(exe)
-            .arg("--settings")
             .args(passthrough)
+            .arg(self.arg)
             .spawn()
         {
             Ok(c) => self.child = Some(c),
-            Err(e) => tracing::warn!("cannot open settings window: {e}"),
+            Err(e) => tracing::warn!("cannot open {} window: {e}", self.arg),
         }
     }
 }
@@ -225,6 +232,7 @@ impl SettingsWindow {
 struct Items {
     status: MenuItem,
     pause: CheckMenuItem,
+    send: MenuItem,
     settings: MenuItem,
     open_config: MenuItem,
     open_logs: MenuItem,
@@ -237,6 +245,7 @@ fn build_menu(autostart: bool) -> Result<(Menu, Items)> {
     let items = Items {
         status: MenuItem::new("ClipBridge: starting…", false, None),
         pause: CheckMenuItem::new("Pause sync", true, false, None),
+        send: MenuItem::new("Send files…", true, None),
         settings: MenuItem::new("Settings…", true, None),
         open_config: MenuItem::new("Open config file", true, None),
         open_logs: MenuItem::new("Open logs folder", true, None),
@@ -249,6 +258,7 @@ fn build_menu(autostart: bool) -> Result<(Menu, Items)> {
         &items.status,
         &PredefinedMenuItem::separator(),
         &items.pause,
+        &items.send,
         &items.settings,
         &PredefinedMenuItem::separator(),
         &items.open_config,
@@ -276,7 +286,9 @@ pub fn install_event_handlers(proxy: &EventLoopProxy<UserEvent>) {
 /// Runs the tray on the current (main) thread. Never returns.
 pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: TrayOptions) -> ! {
     let mut tray: Option<(TrayIcon, Items)> = None;
-    let mut settings = SettingsWindow { child: None };
+    let mut settings = ChildWindow::new("--settings");
+    let mut send = ChildWindow::new("--send");
+    let mut incoming = ChildWindow::new("--incoming");
     let mut last_status: Option<AppStatus> = None;
     let mut quitting = false;
 
@@ -338,6 +350,9 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
             Event::UserEvent(UserEvent::App(AppEvent::OpenSettings)) => {
                 settings.open(&opts.passthrough_args);
             }
+            Event::UserEvent(UserEvent::App(AppEvent::OpenIncoming)) => {
+                incoming.open(&opts.passthrough_args);
+            }
             Event::UserEvent(UserEvent::Tray(TrayIconEvent::Click {
                 button: tray_icon::MouseButton::Left,
                 button_state: tray_icon::MouseButtonState::Up,
@@ -351,6 +366,8 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
                 let id = e.id();
                 if id == items.pause.id() {
                     let _ = ui.try_send(UiCmd::SetPaused(items.pause.is_checked()));
+                } else if id == items.send.id() {
+                    send.open(&opts.passthrough_args);
                 } else if id == items.settings.id() {
                     settings.open(&opts.passthrough_args);
                 } else if id == items.open_config.id() {
@@ -383,6 +400,8 @@ pub fn run(event_loop: EventLoop<UserEvent>, ui: mpsc::Sender<UiCmd>, opts: Tray
                 // updates: while it runs, `open ClipBridge.app` would just focus it
                 // instead of starting the new version.
                 settings.close();
+                send.close();
+                incoming.close();
                 tray = None; // removes the icon before exit
                 *control_flow = ControlFlow::Exit;
             }

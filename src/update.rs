@@ -100,6 +100,11 @@ enum InstallKind {
     Manual,
 }
 
+/// Running from the Windows installer's folder or a macOS `.app` bundle.
+pub fn installed() -> bool {
+    !matches!(install_kind(), InstallKind::Manual)
+}
+
 fn install_kind() -> InstallKind {
     let Ok(exe) = std::env::current_exe() else {
         return InstallKind::Manual;

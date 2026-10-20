@@ -21,10 +21,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::crypto::Cipher;
 use crate::protocol::{self, Clip, Message, PROTOCOL_VERSION};
+use crate::transfer::Hub;
 
 /// Frames before the handshake completes are small; don't let strangers make us
 /// buffer 32 MB.
-const HANDSHAKE_MAX_FRAME: usize = 64 * 1024;
+pub(crate) const HANDSHAKE_MAX_FRAME: usize = 64 * 1024;
 /// Per-peer queue of outgoing clips. A peer this far behind is dropping clips.
 const PEER_QUEUE: usize = 8;
 const TICK: Duration = Duration::from_secs(1);
@@ -61,6 +62,9 @@ pub struct PeerStatus {
     pub device_id: String,
     pub name: String,
     pub addr: String,
+    /// The port it accepts connections on (file transfers dial it).
+    #[serde(default)]
+    pub listen_port: u16,
     pub inbound: bool,
     pub rtt_ms: Option<u32>,
     /// Unix seconds.
@@ -103,6 +107,7 @@ pub struct NetTask {
     pub incoming: mpsc::Sender<Clip>,
     pub discovery: mpsc::Receiver<DiscoveryEvent>,
     pub status: watch::Sender<NetStatus>,
+    pub hub: Arc<Hub>,
     pub cancel: CancellationToken,
 }
 
@@ -138,6 +143,7 @@ struct ConnUp {
     device_id: String,
     name: String,
     addr: SocketAddr,
+    listen_port: u16,
     inbound: bool,
     /// device_id of the side that opened the TCP connection.
     initiator: String,
@@ -152,22 +158,24 @@ struct ConnCtx {
     device_name: String,
     cipher: Cipher,
     timing: Timing,
+    listen_port: u16,
     incoming: mpsc::Sender<Clip>,
     events: mpsc::Sender<ConnEvent>,
+    hub: Arc<Hub>,
 }
 
-type Transport = Framed<TcpStream, tokio_util::codec::LengthDelimitedCodec>;
+pub(crate) type Transport = Framed<TcpStream, tokio_util::codec::LengthDelimitedCodec>;
 
 async fn send_plain(framed: &mut Transport, cipher: &Cipher, plain: &[u8]) -> Result<()> {
     let sealed = cipher.seal(plain)?;
     framed.send(Bytes::from(sealed)).await.context("send")
 }
 
-async fn send_msg(framed: &mut Transport, cipher: &Cipher, msg: &Message) -> Result<()> {
+pub(crate) async fn send_msg(framed: &mut Transport, cipher: &Cipher, msg: &Message) -> Result<()> {
     send_plain(framed, cipher, &msg.encode()?).await
 }
 
-fn open_msg(cipher: &Cipher, frame: &[u8], addr: SocketAddr) -> Result<Message> {
+pub(crate) fn open_msg(cipher: &Cipher, frame: &[u8], addr: SocketAddr) -> Result<Message> {
     let plain = cipher.open(frame).map_err(|e| {
         tracing::warn!("{addr}: {e} — is the passphrase the same on both machines?");
         anyhow!("decryption failed (wrong passphrase?)")
@@ -220,6 +228,7 @@ async fn conn_inner(ctx: &ConnCtx, spec: ConnSpec) -> Result<()> {
         device_id: ctx.device_id.clone(),
         device_name: ctx.device_name.clone(),
         protocol_version: PROTOCOL_VERSION,
+        listen_port: ctx.listen_port,
     };
     send_msg(&mut framed, &ctx.cipher, &hello).await?;
     let first = tokio::select! {
@@ -230,14 +239,37 @@ async fn conn_inner(ctx: &ConnCtx, spec: ConnSpec) -> Result<()> {
         .map_err(|_| anyhow!("handshake timeout"))?
         .ok_or_else(|| anyhow!("closed during handshake"))?
         .context("read handshake")?;
-    let Message::Hello {
-        device_id,
-        device_name,
-        protocol_version,
-    } = open_msg(&ctx.cipher, &frame, addr)?
-    else {
-        bail!("expected Hello");
-    };
+    let (device_id, device_name, protocol_version, listen_port) =
+        match open_msg(&ctx.cipher, &frame, addr)? {
+            Message::Hello {
+                device_id,
+                device_name,
+                protocol_version,
+                listen_port,
+            } => (device_id, device_name, protocol_version, listen_port),
+            // A file transfer: its own connection, never a mesh peer.
+            Message::TransferHello {
+                device_id,
+                device_name,
+                protocol_version,
+            } if inbound => {
+                if protocol_version != PROTOCOL_VERSION || device_id == ctx.device_id {
+                    bail!("transfer from {device_name} refused (protocol v{protocol_version})");
+                }
+                framed.codec_mut().set_max_frame_length(protocol::MAX_FRAME);
+                return crate::transfer::receive(
+                    framed,
+                    &ctx.cipher,
+                    &ctx.hub,
+                    &ctx.device_name,
+                    &device_name,
+                    addr,
+                    &cancel,
+                )
+                .await;
+            }
+            _ => bail!("expected Hello"),
+        };
     if protocol_version != PROTOCOL_VERSION {
         tracing::warn!(
             "{addr} ({device_name}) speaks protocol v{protocol_version}, we speak v{PROTOCOL_VERSION}; update both"
@@ -260,6 +292,7 @@ async fn conn_inner(ctx: &ConnCtx, spec: ConnSpec) -> Result<()> {
         device_id: device_id.clone(),
         name: device_name.clone(),
         addr,
+        listen_port,
         inbound,
         initiator,
         target,
@@ -297,7 +330,8 @@ async fn conn_inner(ctx: &ConnCtx, spec: ConnSpec) -> Result<()> {
                             let _ = ctx.events.try_send(ConnEvent::Rtt { conn_id, ms });
                         }
                     }
-                    Message::Hello { .. } => {}
+                    // Transfer messages only travel on transfer connections.
+                    _ => {}
                 }
             }
             Some(plain) = rx.recv() => send_plain(&mut framed, &ctx.cipher, &plain).await?,
@@ -367,6 +401,7 @@ struct Peer {
     conn_id: u64,
     name: String,
     addr: SocketAddr,
+    listen_port: u16,
     inbound: bool,
     initiator: String,
     tx: mpsc::Sender<Arc<Vec<u8>>>,
@@ -468,6 +503,7 @@ impl Manager {
                 conn_id: up.conn_id,
                 name: up.name,
                 addr: up.addr,
+                listen_port: up.listen_port,
                 inbound: up.inbound,
                 initiator: up.initiator,
                 tx: up.tx,
@@ -602,6 +638,7 @@ impl Manager {
                 device_id: id.clone(),
                 name: p.name.clone(),
                 addr: p.addr.to_string(),
+                listen_port: p.listen_port,
                 inbound: p.inbound,
                 rtt_ms: p.rtt_ms,
                 connected_at: p.connected_at,
@@ -662,6 +699,7 @@ pub async fn run(task: NetTask) {
         incoming,
         mut discovery,
         status,
+        hub,
         cancel,
     } = task;
     let listen_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -671,8 +709,10 @@ pub async fn run(task: NetTask) {
         device_name,
         cipher,
         timing,
+        listen_port,
         incoming,
         events: events_tx,
+        hub,
     });
     let mut m = Manager {
         ctx,

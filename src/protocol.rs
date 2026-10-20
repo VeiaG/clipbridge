@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::codec::LengthDelimitedCodec;
 use uuid::Uuid;
 
-/// v2: added `ClipKind::Html`.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// v2: added `ClipKind::Html`. v3: `Hello::listen_port` and file transfers.
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
 /// Text (and, separately, its HTML) larger than this is not synced. Both together
 /// stay well under [`MAX_FRAME`].
@@ -57,16 +57,44 @@ pub struct Clip {
     pub hash: Hash,
 }
 
+/// One item of a file transfer. Files are sent in this order; directories and empty
+/// files carry no data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    /// Relative, `/`-separated. The receiver sanitizes it (see `transfer`).
+    pub path: String,
+    pub size: u64,
+    pub dir: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     Hello {
         device_id: String,
         device_name: String,
         protocol_version: u16,
+        /// Appended last so older peers still decode the version and can warn.
+        listen_port: u16,
     },
     Clip(Clip),
     Ping,
     Pong,
+    // A transfer runs on its own connection: the dialer answers the receiver's
+    // `Hello` with `TransferHello`, then `Offer`; the receiver answers `Accept` or
+    // `Decline`; then `Chunk`s, `Done`, and the receiver confirms with `Received`.
+    // Either side may send `Cancel` at any point.
+    TransferHello {
+        device_id: String,
+        device_name: String,
+        protocol_version: u16,
+    },
+    Offer(Vec<Entry>),
+    Accept,
+    Decline(String),
+    Chunk(Vec<u8>),
+    Done,
+    Received,
+    Cancel(String),
 }
 
 impl Message {
@@ -103,6 +131,7 @@ mod tests {
                 device_id: "a".into(),
                 device_name: "PC".into(),
                 protocol_version: PROTOCOL_VERSION,
+                listen_port: 47821,
             },
             Message::Clip(Clip {
                 clip_id: Uuid::new_v4(),
@@ -118,11 +147,43 @@ mod tests {
             }),
             Message::Ping,
             Message::Pong,
+            Message::Offer(vec![Entry {
+                path: "dir/файл.txt".into(),
+                size: 5,
+                dir: false,
+            }]),
+            Message::Chunk(vec![0, 1, 255]),
+            Message::Decline("no".into()),
         ];
         for m in msgs {
             assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
         }
         assert!(Message::decode(&[0xff, 0xff, 0xff]).is_err());
+    }
+
+    /// A v2 peer must still read our version number to print a useful warning.
+    #[test]
+    fn old_hello_layout_reads_new_hello() {
+        #[derive(Deserialize)]
+        enum OldMessage {
+            Hello {
+                #[allow(dead_code)]
+                device_id: String,
+                #[allow(dead_code)]
+                device_name: String,
+                protocol_version: u16,
+            },
+        }
+        let new = Message::Hello {
+            device_id: "a".into(),
+            device_name: "PC".into(),
+            protocol_version: PROTOCOL_VERSION,
+            listen_port: 1,
+        };
+        let OldMessage::Hello {
+            protocol_version, ..
+        } = postcard::from_bytes(&new.encode().unwrap()).unwrap();
+        assert_eq!(protocol_version, PROTOCOL_VERSION);
     }
 
     #[test]

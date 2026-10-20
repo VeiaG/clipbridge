@@ -2,6 +2,7 @@
 //! channel, checks for updates and publishes status to the tray.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ use crate::crypto::Cipher;
 use crate::net::{PeerStatus, PendingStatus};
 use crate::node::{self, NodeHandle, NodeParams};
 use crate::sync::SyncStats;
+use crate::transfer::{Hub, HubEvent, ReceiveSettings, TransferInfo, TransferState, Watcher};
 use crate::update::{self, UpdateInfo};
 
 const RETRY_START: Duration = Duration::from_secs(10);
@@ -75,6 +77,8 @@ pub enum AppEvent {
     Status(Box<AppStatus>),
     /// Someone (a second launch) asked to show the settings window.
     OpenSettings,
+    /// A file offer waits for the user: show the incoming-files window.
+    OpenIncoming,
 }
 
 pub struct AppOptions {
@@ -109,6 +113,9 @@ struct App {
     update_tx: mpsc::Sender<UpdateEvent>,
     /// Set once an update has been handed to the installer; the app then exits.
     quit_for_update: bool,
+    hub: Arc<Hub>,
+    /// An automatic update is waiting for transfers to finish.
+    install_when_idle: bool,
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
@@ -120,6 +127,10 @@ fn same_sync_settings(a: &Config, b: &Config) -> bool {
     let strip = |c: &Config| Config {
         check_updates: false,
         auto_update: false,
+        // Read live by the transfer hub.
+        receive_files: true,
+        ask_before_receive: false,
+        receive_dir: String::new(),
         ..c.clone()
     };
     strip(a) == strip(b)
@@ -145,6 +156,7 @@ impl App {
         let Some(cfg) = self.load_config() else {
             return; // keep running with the previous config
         };
+        self.hub.set_settings(ReceiveSettings::from_config(&cfg));
         let unchanged_sync = self
             .config
             .as_ref()
@@ -207,6 +219,7 @@ impl App {
             }
         };
         let mut params = NodeParams::new(cfg, cipher, self.paused.subscribe());
+        params.hub = self.hub.clone();
         // Debug knob: e.g. CLIPBRIDGE_BIND=127.0.0.1 for local experiments without firewall prompts.
         if let Some(ip) = std::env::var("CLIPBRIDGE_BIND")
             .ok()
@@ -335,7 +348,12 @@ impl App {
                         self.update.available = Some(info.clone());
                         let auto = self.config.as_ref().is_some_and(|c| c.auto_update);
                         if auto && info.can_install() {
-                            self.start_update_install();
+                            if self.hub.active() {
+                                // Installing restarts us, which would cut transfers off.
+                                self.install_when_idle = true;
+                            } else {
+                                self.start_update_install();
+                            }
                         }
                     }
                     Ok(None) => {
@@ -364,6 +382,10 @@ impl App {
     }
 
     fn maybe_check_updates(&mut self) {
+        if self.install_when_idle && !self.hub.active() {
+            self.install_when_idle = false;
+            self.start_update_install();
+        }
         let enabled = self.config.as_ref().is_some_and(|c| c.check_updates);
         if !enabled || self.update.busy {
             return;
@@ -378,6 +400,34 @@ impl App {
     }
 }
 
+/// A system notification for a finished transfer, where one is useful.
+fn notify_finished(hub: &Hub, t: &TransferInfo) {
+    let (title, body) = if t.outgoing {
+        // The Send window already shows the outcome.
+        if hub.is_watched(Watcher::Send) {
+            return;
+        }
+        match &t.state {
+            TransferState::Done => ("Files delivered", format!("{} to {}", t.label, t.peer)),
+            TransferState::Declined(r) => ("Files not delivered", format!("{}: {r}", t.label)),
+            TransferState::Failed(r) => {
+                ("Sending failed", format!("{} to {}: {r}", t.label, t.peer))
+            }
+            _ => return,
+        }
+    } else {
+        match &t.state {
+            TransferState::Done => ("Files received", format!("{} from {}", t.label, t.peer)),
+            TransferState::Failed(r) => (
+                "Receiving failed",
+                format!("{} from {}: {r}", t.label, t.peer),
+            ),
+            _ => return,
+        }
+    };
+    crate::notify::spawn(title, &body);
+}
+
 /// Runs until `UiCmd::Quit` (or an update takes over). `sink` receives status
 /// updates and UI requests.
 pub async fn run(
@@ -387,7 +437,10 @@ pub async fn run(
 ) {
     let (paused, _) = watch::channel(false);
     let (update_tx, mut update_rx) = mpsc::channel(4);
+    let (hub, mut hub_rx) = Hub::new(ReceiveSettings::from_config(&Config::default()));
     let mut app = App {
+        hub,
+        install_when_idle: false,
         opts,
         config: None,
         config_mtime: None,
@@ -425,6 +478,12 @@ pub async fn run(
                 Some(UiCmd::Quit) | None => break,
             },
             Some(req) = ctl_rx.recv() => {
+                let mut reply = Response {
+                    ok: true,
+                    status: None,
+                    error: None,
+                    transfers: None,
+                };
                 match req.cmd {
                     Command::Status => {}
                     Command::Reload => app.reload().await,
@@ -433,13 +492,32 @@ pub async fn run(
                     Command::OpenSettings => sink(AppEvent::OpenSettings),
                     Command::CheckUpdates => app.start_update_check(true),
                     Command::InstallUpdate => app.start_update_install(),
+                    Command::SendFiles { paths, peers } => {
+                        let paths = paths.into_iter().map(PathBuf::from).collect();
+                        let sent = match &app.node {
+                            Some(n) => n.send_files(paths, &peers).map(|_| ()),
+                            None => Err("sync isn't running".to_string()),
+                        };
+                        if let Err(e) = sent {
+                            reply.ok = false;
+                            reply.error = Some(e);
+                        }
+                    }
+                    Command::Transfers { watcher } => {
+                        app.hub.watched(watcher);
+                        reply.transfers = Some(app.hub.list());
+                    }
+                    Command::CancelTransfer { id } => app.hub.cancel(id),
+                    Command::Decide { id, accept } => app.hub.decide(id, accept),
+                    Command::ClearFinished { outgoing } => app.hub.clear_finished(outgoing),
                 }
-                let _ = req.reply.send(Response {
-                    ok: true,
-                    status: Some(Box::new(app.status())),
-                    error: None,
-                });
+                reply.status = Some(Box::new(app.status()));
+                let _ = req.reply.send(reply);
             }
+            Some(ev) = hub_rx.recv() => match ev {
+                HubEvent::Offer => sink(AppEvent::OpenIncoming),
+                HubEvent::Finished(t) => notify_finished(&app.hub, &t),
+            },
             Some(ev) = update_rx.recv() => app.on_update_event(ev),
             _ = tick.tick() => {
                 // Pick up hand edits of the config file.

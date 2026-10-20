@@ -4,7 +4,9 @@ ClipBridge keeps the clipboard in sync across your computers on the same local
 network. Copy on one machine, paste on another. It's a small tray app (menu bar on
 macOS) for **Windows and macOS**, written in Rust.
 
-- Syncs **text, rich text (HTML) and images**. Files are not synced.
+- Syncs **text, rich text (HTML) and images**.
+- **Sends files and folders** to your other machines on request: tray menu →
+  *Send files…*, drop them in. Folders arrive as folders, no zipping.
 - **Finds the other machines on its own** via mDNS/Bonjour. If your network blocks
   that, list the peers by hand.
 - **Everything on the wire is encrypted** with ChaCha20-Poly1305. The key comes from
@@ -84,6 +86,24 @@ on one side is enough.
 Tray icon colours: **green** syncing · **grey** paused · **amber** not configured ·
 **red** error (see Settings or the log).
 
+## Sending files
+
+Pick **Send files…** in the tray menu and drop files or folders into the window
+(or use *Add files…* / *Add folder…*). With one other device connected they go
+straight away; with several, tick who gets them and press **Send**. The window
+shows progress and whether they were delivered. You can close it: transfers keep
+going, and you get a notification when they're done.
+
+On the receiving machine, files land in `Downloads/ClipBridge` (change it in
+*Settings → Receiving files*) and a notification says so. Nothing is ever
+overwritten: a second `report.pdf` becomes `report (1).pdf`. Turn on **Ask before
+accepting** to get a window with Accept / Decline first; closing it declines.
+Unfinished transfers leave nothing behind.
+
+Transfers use their own encrypted connection, so clipboard sync keeps working
+during a big one. They're meant for everyday files, not as a LocalSend
+replacement: there's no resuming an interrupted transfer.
+
 ## Updates
 
 ClipBridge checks GitHub for a new release shortly after start and then every
@@ -120,7 +140,10 @@ update whose signature or hash doesn't match is refused.
 | `max_image_mb` | `20`             | Images larger than this (as PNG) are skipped. Max 30. |
 | `discovery`    | `true`           | Use mDNS to find peers. |
 | `check_updates`| `true`           | Look for new versions on GitHub every 12 h. |
-| `auto_update`  | `false`          | Install new versions without asking. |
+| `auto_update`  | `false`          | Install new versions without asking (waits for running transfers). |
+| `receive_files`| `true`           | Accept files other devices send. |
+| `ask_before_receive` | `false`    | Ask before accepting a transfer. |
+| `receive_dir`  | `""`             | Where received files go; empty means `Downloads/ClipBridge`. |
 
 Edits made in Settings, or straight in the file, take effect within a second or
 so; no restart needed.
@@ -133,12 +156,13 @@ the tray menu takes you there.
 ### Command line
 
 ```
-clipbridge [--config <path>] [--headless] [--verbose] [--settings]
+clipbridge [--config <path>] [--headless] [--verbose] [--settings] [--send [paths…]]
 ```
 
 - `--headless` runs without a tray icon, logs to stderr, and stops on Ctrl+C.
 - `--settings` opens the settings window of the running instance. Launching
   ClipBridge a second time does the same thing.
+- `--send [paths…]` opens the Send files window, with those files already added.
 
 ## How it works
 
@@ -154,18 +178,24 @@ sleep/wake, all connections are re-established right away.
 
 ## Known limitations
 
-- Text, rich text (HTML) and images (PNG) only. No files or other formats. If both
-  text and an image are on the clipboard, the text wins.
+- The clipboard carries text, rich text (HTML) and images (PNG) only; copied files
+  aren't synced (use *Send files…*). If both text and an image are on the
+  clipboard, the text wins.
 - Rich text travels as HTML. Apps that copy only RTF (e.g. TextEdit, Pages) sync
   as plain text.
 - Peers must run the same protocol version: update all machines together
-  (0.1.0 cannot talk to newer versions).
+  (0.1.0 cannot talk to newer versions, and versions before file transfers
+  cannot talk to ones with them).
 - Text is limited to 10 MB (HTML formatting too; larger HTML falls back to plain
   text). Images to `max_image_mb`, at most 30 MB because of the 32 MB frame limit.
 - Peers must be on the same LAN or reachable via manual `host:port` entries.
   There's no relay through the internet.
 - The passphrase is the only secret. Anyone who knows it and can reach the port
   can read and write your clipboard. Choose a long one.
+- Notifications: the portable Windows exe shows them as coming from "Windows
+  PowerShell" (only the installed copy registers its own name). Clicking one
+  doesn't open the folder.
+- Symbolic links inside a sent folder are left out.
 - The macOS build is Apple Silicon only, ad-hoc signed, not notarized, and has no custom app icon yet.
 - Linux may work (X11) but isn't tested or supported.
 
